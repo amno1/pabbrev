@@ -334,6 +334,21 @@ I'm not telling you which version, I prefer."
   :group 'pabbrev)
 ;;(setq pabbrev-minimal-expansion-p t)
 
+(defcustom pabbrev-suggestion-labels #'pabbrev-alphabetic-keys
+  "Labels to use for choosing the suggestions.
+
+The alphabet has to be a list of strings of length 1 (a letter or
+a number).  The default one uses numbers 0-9. The alternative one
+defined is a-l keys as defined on qwerty keyboards. Valid options
+are `pabbrev-numeric-keys' and`pabbrev-alphabetic-keys'.
+Alphabetic keys offer more suggestions when those are available.
+
+If you would like to re-order the labels or less suggesttions,
+provide your own function that returns a list of labels in form of a list of
+one-letter strings."
+  :type 'function
+  :group 'pabbrev)
+
 ;; stolen from font-lock!
 (defface pabbrev-suggestions-face
   '((((type tty) (class color)) (:foreground "green"))
@@ -386,6 +401,16 @@ See `pabbrev-long-idle-timer'.")
              (format "... %3d%%"
                      (or percent
                          (floor (* 100.0 (/ (float (point)) (point-max)))))))))
+
+(defsubst pabbrev-numeric-keys ()
+  "Return list of digits 0-9, as strings."
+  (cl-loop for i from 0 to 10 collect (number-to-string i)))
+
+(defsubst pabbrev-alphabetic-keys ()
+  "Return list of letters a-l as defined on qwerty keyboards."
+  (list "a" "s" "d" "f" "g" "h" "j" "k" "l"
+        "q" "w" "e" "r" "t" "y" "u" "i" "o" "p"
+        "z" "x" "c" "v" "b" "n" "m"))
 
 
 ;;;; Begin Package Support.
@@ -1060,32 +1085,33 @@ The command `pabbrev-show-previous-binding' prints this out."
           "Best Match: " (car pabbrev-suggestions-best-suggestion)
           "\n"))
         (when suggestions
-          (dotimes (i 10)
-            ;; are we less than the suggestions
-            (when (< i (length suggestions))
-              (goto-char (point-max))
-              ;; insert all the suggestions
-              (let ((next-suggestion
-                     (concat (number-to-string i) ") "
-                             (car (nth i suggestions)) " " ))
-                    (line-length
-                     (- (line-end-position) (line-beginning-position))))
-                ;; if well. are not on the first suggestion,
-                (when (and (> i 0)
-                           ;; and the line will be too long
-                           (< window-width
-                              (+ line-length (length next-suggestion))))
-                  ;; add a new line.
-                  (princ "\n"))
-                (princ next-suggestion)
-                (let ((start (- (point) (length next-suggestion))))
-                  (overlay-put
-                   (make-overlay start (+ 2 start))
-                   'face 'pabbrev-suggestions-label-face)))))))))
+          (let ((keys (funcall pabbrev-suggestion-labels)))
+            (dolist (key keys)
+              ;; are we less than the suggestions
+              (when (< i (length suggestions))
+                (goto-char (point-max))
+                ;; insert all the suggestions
+                (let ((next-suggestion
+                       (concat key ") " (car (nth key suggestions)) " " ))
+                      (line-length
+                       (- (line-end-position) (line-beginning-position))))
+                  ;; if well. are not on the first suggestion,
+                  (when (and (> i 0)
+                             ;; and the line will be too long
+                             (< window-width
+                                (+ line-length (length next-suggestion))))
+                    ;; add a new line.
+                    (princ "\n"))
+                  (princ next-suggestion)
+                  (let ((start (- (point) (length next-suggestion))))
+                    (overlay-put
+                     (make-overlay start (+ 2 start))
+                     'face 'pabbrev-suggestions-label-face))))))))))
   (shrink-window-if-larger-than-buffer (get-buffer-window " *pabbrev suggestions*")))
 
-(defvar pabbrev-select-mode-map
-  (let ((map (make-sparse-keymap)))
+(setq pabbrev-select-mode-map
+  (let ((map (make-sparse-keymap))
+        (keys (funcall pabbrev-suggestion-labels)))
     (cl-loop for i from ?! to ?~ do
              (define-key map (char-to-string i) #'ignore))
     (define-key map "\t" 'pabbrev-suggestions-select-default)
@@ -1095,8 +1121,8 @@ The command `pabbrev-show-previous-binding' prints this out."
     (define-key map " " 'pabbrev-suggestions-delete-window)
     (define-key map "q" 'pabbrev-suggestions-delete-window)
     ;; Define all the standard insert commands.
-    (dotimes (i 10)
-      (define-key map (number-to-string i) 'pabbrev-suggestions-select))
+    (dolist (key keys)
+      (define-key map key #'pabbrev-suggestions-select))
     map))
 
 (define-derived-mode pabbrev-select-mode fundamental-mode ;Use special-mode?
