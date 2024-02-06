@@ -1065,6 +1065,21 @@ The command `pabbrev-show-previous-binding' prints this out."
   "Set up suggestions major mode."
   (pabbrev-select-mode))
 
+(defun pabbrev--insert-vertical (suggestions)
+  "Insert suggestions in `current-buffer' as a vertical list."
+  (let ((keys (funcall pabbrev-suggestion-labels)))
+    (while (and suggestions keys)
+      (let ((suggestion (pop suggestions))
+            (key (pop keys)))
+        (goto-char (point-max))
+        ;; insert all the suggestions
+        (let ((suggestion (concat key ") " (car suggestion) "\n" )))
+          (princ suggestion)
+          (let ((start (- (point) (length suggestion))))
+            (overlay-put
+             (make-overlay start (+ 2 start))
+             'face 'pabbrev-suggestions-label-face)))))))
+
 (defun pabbrev-suggestions-buffer(suggestions _prefix)
   "Form the suggestions buffer."
   (with-output-to-temp-buffer " *pabbrev suggestions*"
@@ -1085,45 +1100,25 @@ The command `pabbrev-show-previous-binding' prints this out."
           "Best Match: " (car pabbrev-suggestions-best-suggestion)
           "\n"))
         (when suggestions
-          (let ((keys (funcall pabbrev-suggestion-labels)))
-            (dolist (key keys)
-              ;; are we less than the suggestions
-              (when (< i (length suggestions))
-                (goto-char (point-max))
-                ;; insert all the suggestions
-                (let ((next-suggestion
-                       (concat key ") " (car (nth key suggestions)) " " ))
-                      (line-length
-                       (- (line-end-position) (line-beginning-position))))
-                  ;; if well. are not on the first suggestion,
-                  (when (and (> i 0)
-                             ;; and the line will be too long
-                             (< window-width
-                                (+ line-length (length next-suggestion))))
-                    ;; add a new line.
-                    (princ "\n"))
-                  (princ next-suggestion)
-                  (let ((start (- (point) (length next-suggestion))))
-                    (overlay-put
-                     (make-overlay start (+ 2 start))
-                     'face 'pabbrev-suggestions-label-face))))))))))
-  (shrink-window-if-larger-than-buffer (get-buffer-window " *pabbrev suggestions*")))
+          (pabbrev--insert-vertical suggestions)))))
+  (shrink-window-if-larger-than-buffer
+   (get-buffer-window " *pabbrev suggestions*")))
 
-(setq pabbrev-select-mode-map
-  (let ((map (make-sparse-keymap))
-        (keys (funcall pabbrev-suggestion-labels)))
-    (cl-loop for i from ?! to ?~ do
-             (define-key map (char-to-string i) #'ignore))
-    (define-key map "\t" 'pabbrev-suggestions-select-default)
-    (define-key map [delete] 'pabbrev-suggestions-delete)
-    (define-key map "\C-?" 'pabbrev-suggestions-delete)
-    (define-key map "\C-m" 'pabbrev-suggestions-minimum)
-    (define-key map " " 'pabbrev-suggestions-delete-window)
-    (define-key map "q" 'pabbrev-suggestions-delete-window)
-    ;; Define all the standard insert commands.
-    (dolist (key keys)
-      (define-key map key #'pabbrev-suggestions-select))
-    map))
+(defvar pabbrev-select-mode-map
+      (let ((map (make-sparse-keymap))
+            (keys (funcall pabbrev-suggestion-labels)))
+        (cl-loop for i from ?! to ?~ do
+                 (define-key map (char-to-string i) #'ignore))
+        (define-key map "\t" 'pabbrev-suggestions-select-default)
+        (define-key map [delete] 'pabbrev-suggestions-delete)
+        (define-key map "\C-?" 'pabbrev-suggestions-delete)
+        (define-key map "\C-m" 'pabbrev-suggestions-minimum)
+        (define-key map " " 'pabbrev-suggestions-delete-window)
+        (define-key map "q" 'pabbrev-suggestions-delete-window)
+        ;; Define all the standard insert commands.
+        (dolist (key keys)
+          (define-key map key #'pabbrev-suggestions-select))
+        map))
 
 (define-derived-mode pabbrev-select-mode fundamental-mode ;Use special-mode?
   "Pabbrev Select"
