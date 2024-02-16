@@ -227,6 +227,8 @@
 ;; - Cosmestic changes (enable lexical-binding, silence compiler warnings, ...)
 
 ;;; Code:
+(require 'ring)
+(require 'pcase)
 (require 'cl-lib)
 (require 'thingatpt)
 
@@ -340,12 +342,9 @@ I'm not telling you which version, I prefer."
      :inverse-video t))
   "Font Lock mode face used to highlight suggestions")
 
-
 ;;;; End user Customizable variables.
-
-
 
-;;;; Begin Package Support.
+;;; Begin Package Support.
 
 ;; mark commands after which expansion should be offered
 (mapc
@@ -372,7 +371,7 @@ I'm not telling you which version, I prefer."
    gnus-article-mode))
 
 ;;;; End Package Support
-
+
 ;;; Start data structures
 (defvar pabbrev-usage-hash-modes nil
   "List of modes with associated usage dictionaries.")
@@ -396,6 +395,20 @@ would be irritating in the extreme.")
 (defvar pabbrev-short-idle-timer nil
   "Timer which adds a few words.
 See `pabbrev-long-idle-timer'.")
+
+(defvar pabbrev-choose-suggestion-function nil
+  "Function called when user asks for other suggestions than the default one.
+
+This function should take one argument, the list of suggestions at point, and
+return the selected one.")
+
+(defvar pabbrev-mode nil) ; forward declare to silence byte compiler
+(defvar pabbrev--ring-index 1)
+(defvar pabbrev-cycle-suggestions nil)
+(defvar pabbrev-expand-confirmed nil)
+(defvar pabbrev-suggestions-from-buffer nil)
+(defvar pabbrev-suggestions-done-suggestions nil)
+(defvar pabbrev-suggestions-best-suggestion nil)
 
 (defun pabbrev-get-usage-hash()
   "Return the usage hash for this buffer."
@@ -513,21 +526,176 @@ it's ordering is part of the core data structures"
   (gethash prefix (pabbrev-get-prefix-hash)))
 ;; Which completes the core data structures.
 
-;; This code provides the minor mode which displays, and accepts
-;; abbreviations.
-(defvar pabbrev-mode-map
-  (let ((map (make-sparse-keymap)))
+
+;;; The following are debug functions.
+;;(setq pabbrev-debug-display t)
+(defvar pabbrev-debug-display nil
+  "If t visible mark the progress of function `pabbrev-mode' through the buffer.
+This looks very ugly.  Note that this only shows newly added words.  Use
+`pabbrev-debug-remove-properties' to clear this invisible markers.  Use
+`pabbrev-debug-show-all-properties' to show existing markers.")
 
-    ;; It should be possible to reconfigure this now, although there is special
-    ;; handling in `pabbrev-get-previous-binding' for tab and return and this
-    ;; might be needed for other bindings also.
+(defsubst pabbrev-debug-display (start end)
+  (when pabbrev-debug-display
+    (overlay-put
+     (make-overlay start end)
+     'face 'pabbrev-debug-display-label-face)))
 
-    ;; \t works in tty but gets overridden by the [tab] binding elsewhere.
-    (define-key map "\t" #'pabbrev-expand-maybe)
-    ;; This is not needed since function-key-map remaps a `tab' into a \t.
-    ;;(define-key map [tab] #'pabbrev-expand-maybe)
-    map)
-  "Keymap for pabbrev-minor-mode.")
+(defvar pabbrev-debug-buffer nil)
+(defsubst pabbrev-debug-get-buffer()
+  (get-buffer-create "*pabbrev-debug"))
+
+;;(setq pabbrev-debug-enabled t)
+(defvar pabbrev-debug-enabled nil)
+
+(defun pabbrev-debug()
+  (interactive)
+  (pabbrev-debug-frame)
+  (setq pabbrev-debug-enabled t))
+
+(defvar pabbrev-debug-frame nil)
+(defun pabbrev-debug-frame ()
+  (interactive)
+  (when (not pabbrev-debug-frame)
+      (setq pabbrev-debug-frame
+            (make-frame '((width . 30)
+                          (height . 30))))
+      (select-frame pabbrev-debug-frame)
+      (switch-to-buffer (pabbrev-debug-get-buffer))))
+
+(defun pabbrev-debug-frame-scroll ()
+  (save-excursion
+    (when pabbrev-debug-frame
+        (select-frame pabbrev-debug-frame)
+        (switch-to-buffer (pabbrev-debug-get-buffer))
+        (goto-char (point-max)))))
+
+(defface pabbrev-debug-display-label-face
+  '((t
+     (:underline "navy")))
+  "Font Lock mode face used to highlight suggestions")
+
+(defun pabbrev-debug-erase-all-overlays()
+  "Kill all visible overlays from the current buffer. "
+  (interactive)
+  (pabbrev-debug-remove-properties)
+  (mapcar
+   (lambda(overlay)
+     (when (eq 'pabbrev-debug-display-label-face
+               (overlay-get overlay 'face))
+       (delete-overlay overlay)))
+   (overlays-in (point-min) (point-max))))
+
+(defun pabbrev-debug-show-all-properties()
+  "Show all existing markers.
+This can be rather slow."
+  (interactive)
+  (goto-char (point-min))
+  (let ((on-mark-state nil)
+        (on-mark))
+    (while t
+      (setq on-mark (get-text-property (point) 'pabbrev-added))
+      (message "On line %s" (count-lines (point-min) (point)))
+      (cond
+       ;; just moved onto marked area
+       ((and on-mark (not on-mark-state))
+        (setq on-mark-state (point)))
+       ;; just moved off a marked area
+       ((and on-mark-state (not on-mark))
+        (overlay-put (make-overlay on-mark-state (point)) 'face 'underline)
+        (setq on-mark-state nil)))
+      (forward-char))))
+
+(defun pabbrev-debug-restart-idle-timer()
+  "Kill and restart the idle timers."
+  (interactive)
+  (pabbrev-debug-kill-idle-timer)
+  (pabbrev-ensure-idle-timer))
+
+(defun pabbrev-debug-kill-idle-timer()
+  "Kill the idle timers.
+Toggling `pabbrev-mode' will tend to turn them on again, as
+will `pabbrev-debug-restart-idle-timer'."
+  (interactive)
+  (when pabbrev-short-idle-timer      
+      (cancel-timer pabbrev-short-idle-timer)
+      (setq pabbrev-short-idle-timer nil))
+  (when pabbrev-long-idle-timer
+      (cancel-timer pabbrev-long-idle-timer)
+      (setq pabbrev-long-idle-timer nil)))
+
+(defsubst pabbrev-debug-clear()
+  (pabbrev-debug-clear-all-hashes)
+  (pabbrev-debug-remove-properties))
+
+(defun pabbrev-debug-remove-properties()
+  "Remove all the `pabbrev-added' properties from the buffer.
+This means all the words in the buffer will be open for addition
+to the dictionary."
+  (interactive)
+  (remove-text-properties (point-min) (point-max) '(pabbrev-added)))
+
+(defun pabbrev-debug-clear-hashes(&optional mode)
+  "Clear the dictionary for major mode MODE, or the current mode."
+  (interactive)
+  (unless mode (setq mode major-mode))
+  (setq pabbrev-prefix-hash-modes (delq mode pabbrev-prefix-hash-modes)
+        pabbrev-usage-hash-modes  (delq mode pabbrev-usage-hash-modes))
+  ;; help the GC a bit..
+  (when (pabbrev-get-usage-hash)
+      (clrhash (pabbrev-get-usage-hash))
+      (put mode 'pabbrev-usage-hash nil))
+  (when (pabbrev-get-prefix-hash)
+      (clrhash (pabbrev-get-prefix-hash))
+      (put mode 'pabbrev-get-prefix-hash nil)))
+
+(defun pabbrev-debug-clear-all-hashes()
+  "Clear all hashes for all modes."
+  (interactive)
+  (mapcar #'pabbrev-debug-clear-hashes pabbrev-prefix-hash-modes))
+
+(defun pabbrev-debug-print-hashes()
+  "Print the hashes for the current mode."
+  (interactive)
+  (let ((usage (pabbrev-get-usage-hash))
+        (prefix (pabbrev-get-prefix-hash)))
+    (switch-to-buffer (get-buffer-create "*pabbrev hash*"))
+    (erase-buffer)
+    (unless usage
+      (insert "Usage hash nil"))
+    (insert "Usage hash size "
+            (number-to-string
+             (hash-table-count usage)) "\n")
+    (if (not prefix)
+        (insert "Prefix hash nil")
+      (insert "Prefix hash size "
+              (number-to-string
+               (hash-table-count prefix)) "\n"))
+    (insert "Usage hash:\n")
+    (pabbrev-debug-print-hash usage)
+    (insert "Prefix hash:\n")
+    (pabbrev-debug-print-hash prefix)))
+
+(defun pabbrev-debug-print-hash(hash)
+  "Pretty print a hash."
+  (when hash
+    (pp hash (current-buffer))
+    (insert "\n")
+    (insert (hash-table-count hash))
+    (insert "\n")
+    (maphash
+     (lambda(key value)
+       (insert (concat "KEY: " key "\n"))
+       (pp value (current-buffer)))
+     hash)))
+
+;; nobble pabbrev -- useful for profiling.
+;;
+;; nobble core data structures...
+;;(defun pabbrev-add-word(word))
+;;
+;; nobble text properties...
+;; (defun pabbrev-mark-add-word (bounds))
 
 (defsubst pabbrev-bounds-of-thing-at-point()
   "Get the bounds of the thing at point"
@@ -549,73 +717,6 @@ it's ordering is part of the core data structures"
     (if (not (and pabbrev-short-idle-timer
                   pabbrev-long-idle-timer))
         (pabbrev-start-idle-timer))))
-
-;;;###autoload
-(define-minor-mode pabbrev-mode
-  "Toggle pabbrev mode.
-With arg, turn on Predicative Abbreviation mode if and only if arg is
-positive.
-
-This mode is another abbreviation expansion mode somewhat like
-`dabbrev-expand', in that it looks through the current buffer for
-symbols that can complete the current symbol. Unlike `dabbrev-expand',
-it does this by discovering the words during the Emacs idle time, and
-places the results into data structures which enable very rapid
-extraction of expansions. The upshot of this is that it can offer
-suggestions as you type, without causing an unacceptable slow down.
-
-There is an associated `global-pabbrev-mode' which turns on the mode
-on in all buffers.
-"
-  :global nil
-  :lighter " Pabbrev"
-  :keymap pabbrev-mode-map
-  (when (and pabbrev-mode buffer-read-only pabbrev-read-only-error)
-    ;; FIXME: Signaling an error makes no sense.  Just make it a `message'
-    ;; and get rid of pabbrev-read-only-error.  After all, the user can
-    ;; enable/disable read-only-mode after pabbrev-mode.
-    (message "Can not use pabbrev-mode in read only buffer"))
-  (cond
-   (pabbrev-mode
-    (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
-    (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t)
-    ;; Switch on the idle timer if required when the mode is switched on.
-    (pabbrev-ensure-idle-timer)
-    ;; Also run the idle timer function, to put some works in the
-    ;; dictionary.
-    (pabbrev-scavenge-some))
-   (t
-    (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
-    (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
-
-;;   (easy-mmode-define-minor-mode pabbrev-mode
-;;                              "Toggle pabbrev mode.
-;; This mode is an abbreviation expansion mode. It looks through the
-;; current buffer, and offers expansions based on the words already
-;; there.
-
-;;;###autoload
-(define-global-minor-mode global-pabbrev-mode
-  pabbrev-mode pabbrev-global-mode)
-
-(defun pabbrev-global-mode()
-  "Switch on `pabbrev-mode' in current buffer if appropriate.
-Currently appropriate means, if the buffer is not read only, and is
-not a minibuffer."
-  (unless (or buffer-read-only
-              pabbrev-mode
-              (get major-mode 'pabbrev-global-mode-excluded-modes)
-              ;; don't turn on in non listable buffers
-              (equal (substring (buffer-name) 0 1) " ")
-              (when pabbrev-global-mode-buffer-size-limit
-                (> (buffer-size) pabbrev-global-mode-buffer-size-limit))
-              (member (buffer-name) pabbrev-global-mode-not-buffer-names)
-              (window-minibuffer-p (selected-window)))
-    (let
-        ;; set the chunk size low, or the global mode takes for ever
-        ;; to switch on
-        ((pabbrev-scavenge-some-chunk-size 0))
-      (pabbrev-mode))))
 
 (defvar-local pabbrev-marker nil
   "Location of current insertion, or nil.
@@ -657,6 +758,13 @@ start and end positions")
 ;;    (cdr (pabbrev-bounds-of-thing-at-point))
 ;;    (pabbrev-fetch-all-suggestions-for-prefix
 ;;     (pabbrev-thing-at-point))))
+(defvar pabbrev-expand-commands
+  '(pabbrev-expand-maybe pabbrev-expand
+    pabbrev-expand-maybe-minimal pabbrev-expand-maybe-full
+    pabbrev-cycle-suggestions)
+  "List of commands which will be used expand.
+We need to know this, or the possible expansions are deleted
+before the command gets run.")
 
 (defun pabbrev-post-command-hook()
   "Offer expansion if appropriate.
@@ -668,8 +776,9 @@ This function is normally run off the `post-command-hook'."
       (unless (or buffer-read-only (window-minibuffer-p (selected-window)))
         (save-excursion
           ;; ensure that any suggestion is deleted.
-          (when pabbrev-marker
-            (pabbrev-delete-last-suggestion))
+          (and pabbrev-marker
+               (not (memq this-command pabbrev-expand-commands))
+               (pabbrev-delete-last-suggestion))
           (let ((word (pabbrev-thing-at-point))
                 (bounds (pabbrev-bounds-of-thing-at-point))
                 (suggestions))
@@ -686,18 +795,12 @@ This function is normally run off the `post-command-hook'."
                    ;; we are at the end of it.
                    (= (point) (cdr bounds))
                    ;; and we have some suggestions.
-                   (setq suggestions (pabbrev-fetch-all-suggestions-for-prefix word)))
+                   (setq suggestions
+                         (pabbrev-fetch-all-suggestions-for-prefix word)))
               (pabbrev-insert-suggestion word suggestions)
               (pabbrev-post-command-check-movement)))))
     (error
      (pabbrev-command-hook-fail err "post"))))
-
-(defvar pabbrev-expand-commands
-  '(pabbrev-expand-maybe pabbrev-expand
-    pabbrev-expand-maybe-minimal pabbrev-expand-maybe-full)
-  "List of commands which will be used expand.
-We need to know this, or the possible expansions are deleted
-before the command gets run.")
 
 (defun pabbrev-pre-command-hook()
   "Remove offering expansion from the buffer, if present.
@@ -705,10 +808,17 @@ This function is normally run off the `pre-command-hook'"
   (condition-case err
       (progn
         (unless (memq this-command pabbrev-expand-commands)
-          (setq pabbrev-expansion nil
-                pabbrev-expansion-suggestions nil))
+          (setq  pabbrev-expansion nil
+                 pabbrev-expansion-suggestions nil))
         (when pabbrev-marker
-          (pabbrev-delete-last-suggestion)))
+          (pabbrev-delete-last-suggestion))
+        (when (or pabbrev-expand-confirmed
+                  (eql this-command 'self-insert-command))
+          (setq pabbrev-overlay nil
+                pabbrev--ring-index  0
+                pabbrev-expand-confirmed nil
+                pabbrev-cycle-suggestions nil
+                pabbrev-expansion-suggestions nil)))
     ;;catch the error
     (error
      (pabbrev-command-hook-fail err "pre"))))
@@ -735,9 +845,6 @@ anything. Toggling it off, and then on again will usually restore functionality.
       (backtrace)))
   (select-window (get-buffer-window "*pabbrev-fail*"))
   (error "Error in pabbrev-mode"))
-
-(defsubst pabbrev-debug-get-buffer()
-  (get-buffer-create "*pabbrev-debug"))
 
 (defsubst pabbrev-marker-last-expansion()
   "Fetch marker for last offered expansion."
@@ -780,38 +887,12 @@ anything. Toggling it off, and then on again will usually restore functionality.
                  'pabbrev-single-suggestion-face))
   (move-overlay pabbrev-overlay start end (current-buffer)))
 
-(defun pabbrev-insert-suggestion(prefix suggestions)
-  "Insert a suggestion into the buffer.
-The suggestion should start with PREFIX, and be entered at point."
-  (interactive)
-  (let* ((suggestion
-          (if (not pabbrev-minimal-expansion-p)
-              (car (car suggestions))
-            (try-completion "" suggestions)))
-         (expansion
-           (if suggestion
-               (substring suggestion (length prefix))
-             "")))
-    (when (< 0 (length expansion))
-      ;; Add the abbreviation to the buffer.
-      (setq pabbrev-expansion expansion
-            pabbrev-expansion-suggestions suggestions)
-      (pabbrev-set-overlay (point) (point) (length suggestions))
-      (setq pabbrev-marker (cons (point) (point)))
-      (overlay-put pabbrev-overlay
-                   'after-string
-                   (concat
-                    (propertize "[" 'cursor 1)
-                    (propertize expansion
-                                'face (overlay-get pabbrev-overlay 'face))
-                    "]")))))
-
 (defvar pabbrev-last-expansion-suggestions nil
   "Cached alternative suggestions from the last expansion.")
 
 ;; patch from Trey Jackson to fix problem with python (which uses tab to cycle
 ;; through indentation levels
-(defun pabbrev-call-previous-tab-binding ()
+(defun pabbrev-call-previous-key-binding ()
   "Call the function normally associated with [tab]."
   (let ((prev-binding (pabbrev-get-previous-binding)))
     (when (and (fboundp prev-binding)
@@ -848,10 +929,10 @@ With prefix argument, bring up the menu of all full expansions.
 UARG is the prefix argument."
   (cond
    ((and (= uarg 4) (> (length pabbrev-expansion-suggestions) 1))
-    (pabbrev-suggestions-goto-buffer pabbrev-expansion-suggestions))
+    (pabbrev-cycle-suggestions))
    (pabbrev-expansion
     (pabbrev-expand))
-   (t (pabbrev-call-previous-tab-binding))))
+   (t (pabbrev-call-previous-key-binding))))
 
 (defun pabbrev-expand-maybe-full (uarg)
   "Expand fully to the most common abbreviation at point.
@@ -859,15 +940,15 @@ With prefix argument, bring up a menu of all full expansions.
 UARG is the prefix argument."
   (cond
    ((and (= uarg 4) (> (length pabbrev-expansion-suggestions) 1))
-    (pabbrev-suggestions-goto-buffer pabbrev-expansion-suggestions))
+    (pabbrev-cycle-suggestions))
    ((and (eq last-command 'pabbrev-expand-maybe)
          (> (length pabbrev-expansion-suggestions) 1)
          (> (length pabbrev-last-expansion-suggestions) 1))
-    (pabbrev-suggestions-goto-buffer pabbrev-last-expansion-suggestions))
+    (pabbrev-cycle-suggestions))
    (pabbrev-expansion
     (setq pabbrev-last-expansion-suggestions pabbrev-expansion-suggestions)
     (pabbrev-expand))
-   (t (pabbrev-call-previous-tab-binding))))
+   (t (pabbrev-call-previous-key-binding))))
 
 ;; (setq pabbrev-minimal-expansion-p nil)
 
@@ -880,7 +961,8 @@ Debugging function."
 (defun pabbrev-get-previous-binding ()
   "Show the binding of tab if pabbrev were not active.
 The command `pabbrev-show-previous-binding' prints this out."
-  (let ((pabbrev-mode nil))
+  (let ((pabbrev-mode nil)
+        (tckv (this-command-keys-vector)))
     ;; tab is special, because we can bind both [tab]
     ;; and \t. Normally, pabbrev binds to [tab] but for example
     ;; so this-command-keys-vector returns [tab]. But, emacs-lisp-mode for
@@ -890,20 +972,20 @@ The command `pabbrev-show-previous-binding' prints this out."
     ;; we check for tab and return either the binding for tab or the binding
     ;; for \t which should work regardless of what the mode binds.
     ;; Likewise return it seems!
-    (let ((tckv (this-command-keys-vector)))
-      (cond
-       ((or (equal tckv [tab]) (equal tckv [9]))
-        (or (key-binding [tab]) (key-binding "\t")))
-       ((or (equal tckv [return]) (equal tckv [32]))
-        (or (key-binding [return]) (key-binding "\n")))
-       (t (key-binding tckv))))))
+    (pcase tckv
+      ('[tab]    (key-binding [tab]))
+      ('[9]      (key-binding "\t"))
+      ('[13]     (key-binding [13]))
+      ('[return] (key-binding [13]))
+      ('[32]     (key-binding " "))
+      (_         (key-binding tckv)))))
 
-    ;; ;; This is the original and satisfying solution
-    ;; (key-binding (this-command-keys))))
-    ;; This is the new and unsatisfying one. The
-    ;; keybindings are hard coded here, because I defined
-    ;; [tab] and \t earlier. Both are tab, but the former
-    ;; gets used in preference to the later.
+;; ;; This is the original and satisfying solution
+;; (key-binding (this-command-keys))))
+;; This is the new and unsatisfying one. The
+;; keybindings are hard coded here, because I defined
+;; [tab] and \t earlier. Both are tab, but the former
+;; gets used in preference to the later.
 ;;    (or (key-binding [tab])
 ;;        (key-binding "\t"))))
 
@@ -923,9 +1005,11 @@ The command `pabbrev-show-previous-binding' prints this out."
 (defun pabbrev-expand()
   "Expand abbreviation"
   (setq pabbrev-expand-previous-word (pabbrev-thing-at-point))
-  (if pabbrev-expansion
-      (insert pabbrev-expansion)
-    (message "No expansion"))
+  (cond
+   (pabbrev-expansion
+    (insert pabbrev-expansion)
+    (setq pabbrev-expand-confirmed t))
+   (t (message "No expansion")))
   (setq pabbrev-expansion nil))
 
 (defvar pabbrev-window-configuration nil
@@ -953,13 +1037,6 @@ The command `pabbrev-show-previous-binding' prints this out."
 ;;               'pabbrev-suggestions-delete-window)
 ;;     (message "pabbrev suggestions on")))
 
-(defun pabbrev-suggestions-delete-window()
-  "Delete the suggestions window."
-  (interactive)
-  (when (or pabbrev-mode (equal (buffer-name) " *pabbrev suggestions*"))
-    (delete-window (get-buffer-window " *pabbrev suggestions*"))
-    (set-window-configuration pabbrev-window-configuration)))
-
 ;; (defun pabbrev-post-command-delete-suggestions()
 ;;   (interactive)
 ;;   (if pabbrev-suggestions-buffer-enable
@@ -972,142 +1049,8 @@ The command `pabbrev-show-previous-binding' prints this out."
 ;;   (if pabbrev-suggestions-buffer-enable
 ;;       (pabbrev-suggestions-buffer suggestions prefix)))
 
-
-(defun pabbrev-suggestions-goto-buffer(suggestion-list)
-  "Jump into the suggestions buffer."
-  ;;  (if pabbrev-suggestions-buffer-enable
-  ;;    (pabbrev-suggestions-delete-window))
-  (setq pabbrev-window-configuration (current-window-configuration))
-  (pabbrev-suggestions-buffer suggestion-list "")
-  (shrink-window-if-larger-than-buffer
-   (select-window (get-buffer-window " *pabbrev suggestions*"))))
-
-(defvar pabbrev-suggestions-from-buffer nil)
-(defvar pabbrev-suggestions-done-suggestions nil)
-(defvar pabbrev-suggestions-best-suggestion nil)
-
-(defsubst pabbrev-suggestions-subseq(sequence from to)
-  "Return subsequence from SEQUENCE starting FROM and ending with TO."
-  (cl-subseq sequence (min 0 from) (min (length sequence) to)))
-
-(defsubst pabbrev-suggestions-limit-alpha-sort (suggestions)
-  "Limit suggestions and sort."
-  (delq nil
-        (sort (pabbrev-suggestions-subseq suggestions 0 10)
-              (lambda(a b)
-                (string< (car a) (car b))))))
-
-(defsubst pabbrev-suggestions-setup()
-  "Set up suggestions major mode."
-  (pabbrev-select-mode))
-
-(defun pabbrev-suggestions-buffer(suggestions _prefix)
-  "Form the suggestions buffer."
-  (with-output-to-temp-buffer " *pabbrev suggestions*"
-    (setq pabbrev-suggestions-from-buffer (current-buffer)
-          pabbrev-suggestions-best-suggestion (car suggestions)
-          pabbrev-suggestions-done-suggestions
-          (pabbrev-suggestions-limit-alpha-sort suggestions)
-          suggestions pabbrev-suggestions-done-suggestions)
-    (let ((window-width (- (window-width) 1)))
-      (with-current-buffer (get-buffer " *pabbrev suggestions*")
-        (pabbrev-suggestions-setup)`
-        (princ
-         (concat ;;"Current Word: " prefix " "
-          "Max Substring: " (try-completion "" suggestions)
-          "\n"))
-        (princ
-         (concat
-          "Best Match: " (car pabbrev-suggestions-best-suggestion)
-          "\n"))
-        (when suggestions
-          (dotimes (i 10)
-            ;; are we less than the suggestions
-            (when (< i (length suggestions))
-              (goto-char (point-max))
-              ;; insert all the suggestions
-              (let ((next-suggestion
-                     (concat (number-to-string i) ") "
-                             (car (nth i suggestions)) " " ))
-                    (line-length
-                     (- (line-end-position) (line-beginning-position))))
-                ;; if well. are not on the first suggestion,
-                (when (and (> i 0)
-                           ;; and the line will be too long
-                           (< window-width
-                              (+ line-length (length next-suggestion))))
-                  ;; add a new line.
-                  (princ "\n"))
-                (princ next-suggestion)
-                (let ((start (- (point) (length next-suggestion))))
-                  (overlay-put
-                   (make-overlay start (+ 2 start))
-                   'face 'pabbrev-suggestions-label-face)))))))))
-  (shrink-window-if-larger-than-buffer (get-buffer-window " *pabbrev suggestions*")))
-
-(defvar pabbrev-select-mode-map
-  (let ((map (make-sparse-keymap)))
-    (cl-loop for i from ?! to ?~ do
-             (define-key map (char-to-string i) #'ignore))
-    (define-key map "\t"     #'pabbrev-suggestions-select-default)
-    (define-key map [delete] #'pabbrev-suggestions-delete)
-    (define-key map "\C-?"   #'pabbrev-suggestions-delete)
-    (define-key map "\C-m"   #'pabbrev-suggestions-minimum)
-    (define-key map " "      #'pabbrev-suggestions-delete-window)
-    (define-key map "q"      #'pabbrev-suggestions-delete-window)
-    ;; Define all the standard insert commands.
-    (dotimes (i 10)
-      (define-key map (number-to-string i) #'pabbrev-suggestions-select))
-    map))
-
-(define-derived-mode pabbrev-select-mode fundamental-mode ;Use special-mode?
-  "Pabbrev Select"
-  "Major mode for selecting `pabbrev-mode' expansions.
-The number keys selects the various possible expansions. \\[pabbrev-suggestions-delete]
-removes the previously added expansion, \\[pabbrev-suggestions-minimum] selects the minimum
-matching substring, while \\[pabbrev-suggestions-delete-window] just deletes the window
-\\{pabbrev-select-mode-map}")
-
-(defun pabbrev-suggestions-select-default()
-  "Select the most commonly occuring string."
-  (interactive)
-  (when pabbrev-suggestions-best-suggestion
-    (pabbrev-suggestions-insert (car pabbrev-suggestions-best-suggestion))))
-
-(defun pabbrev-suggestions-delete()
-  "Delete the last suggestion."
-  (interactive)
-  (pabbrev-suggestions-insert pabbrev-expand-previous-word))
-
-(defun pabbrev-suggestions-minimum()
-  "Select the maximally occuring substring."
-  (interactive)
-  (pabbrev-suggestions-insert
-   ;;(try-completion "" pabbrev-suggestions-done-suggestions)))
-   (try-completion
-    "" (pabbrev-suggestions-subseq pabbrev-suggestions-done-suggestions 0 10))))
-
-(defun pabbrev-suggestions-insert(insertion)
-  "Actually insert the suggestion."
-  (let ((point))
-    (with-current-buffer
-        pabbrev-suggestions-from-buffer
-      (let ((bounds (pabbrev-bounds-of-thing-at-point)))
-        (delete-region (car bounds) (cdr bounds))
-        (insert insertion)
-        (setq point (point))))
-    (pabbrev-suggestions-delete-window)
-    (when point (goto-char point))))
-
-(defun pabbrev-suggestions-select(&optional index)
-  "Select one of the numbered suggestions."
-  (interactive)
-  (let ((insert-index
-         (or index (string-to-number (char-to-string last-command-event)))))
-    (when (< insert-index (length pabbrev-suggestions-done-suggestions))
-      (pabbrev-suggestions-insert
-       (car (nth insert-index pabbrev-suggestions-done-suggestions))))))
-
+
+;;; Scavenge functionality
 ;; These functions define movement around the buffer, which
 ;; determines what pabbrev considers to be a "word"
 (defun pabbrev-forward-thing(&optional number)
@@ -1126,19 +1069,6 @@ matching substring, while \\[pabbrev-suggestions-delete-window] just deletes the
         (when (setq retn (get-text-property i 'pabbrev-added))
           (setq i end)))
       retn)))
-
-;;(setq pabbrev-debug-display t)
-(defvar pabbrev-debug-display nil
-  "If t visible mark the progress of function `pabbrev-mode' through the buffer.
-This looks very ugly.  Note that this only shows newly added words.  Use
-`pabbrev-debug-remove-properties' to clear this invisible markers.  Use
-`pabbrev-debug-show-all-properties' to show existing markers.")
-
-(defsubst pabbrev-debug-display (start end)
-  (when pabbrev-debug-display
-    (overlay-put
-     (make-overlay start end)
-     'face 'pabbrev-debug-display-label-face)))
 
 (defun pabbrev-mark-add-word (bounds)
   "Add word in BOUNDS as abbreviation, and mark the buffer."
@@ -1309,161 +1239,189 @@ If it up too much processor power, see `pabbrev-scavenge-some-chunk-size'."
   (interactive)
   (message "Swiching off pabbrev messages" )
   (setq pabbrev-idle-timer-verbose nil))
+
 
-;;; The following are debug functions.
-(defvar pabbrev-debug-buffer nil)
+;;; Suggestions handling
+(defvar pabbrev--cycle-start-p nil
+  "Intern variable meaning the user is cycling suggestions.")
 
-;;(setq pabbrev-debug-enabled t)
-(defvar pabbrev-debug-enabled nil)
+(defun pabbrev-insert-suggestion(prefix suggestions)
+  "Insert a suggestion into the buffer.
+The suggestion should start with PREFIX, and be entered at point."
+  (let* ((suggestion
+          (cond
+           ((ring-p suggestions)
+            (car (ring-ref suggestions pabbrev--ring-index)))
+           ((not pabbrev-minimal-expansion-p)
+               (car (car suggestions)))
+           (t 
+            (try-completion "" suggestions))))
+         (length (if (ring-p suggestions)
+                     (ring-length suggestions)
+                   (length suggestions)))
+         (expansion
+          (if suggestion
+              (substring suggestion (length prefix))
+            "")))
+    (when (< 0 (length expansion))
+      ;; Add the abbreviation to the buffer.
+      (setq pabbrev-expansion expansion)
+      (unless (ring-p suggestions)
+        (setq pabbrev-expansion-suggestions suggestions))
+      (pabbrev-set-overlay (point) (point) length)
+      (setq pabbrev-marker (cons (point) (point)))
+      (overlay-put pabbrev-overlay
+                   'after-string
+                   (concat
+                    (propertize "[" 'cursor 1)
+                    (propertize expansion
+                                'face (overlay-get pabbrev-overlay 'face))
+                    "]")))))
 
-(defun pabbrev-debug()
+(defun pabbrev-cycle-suggestions ()
+  "Return next suggestion from the suggestions list."
   (interactive)
-  (pabbrev-debug-frame)
-  (setq pabbrev-debug-enabled t))
+  (cond
+   (pabbrev-expansion-suggestions
+    (unless pabbrev-cycle-suggestions
+      (setq pabbrev-cycle-suggestions
+            (make-ring (length pabbrev-expansion-suggestions)))
+      (dolist (elt pabbrev-expansion-suggestions)
+        (ring-insert pabbrev-cycle-suggestions elt)))
+    (let* ((prefix (pabbrev-thing-at-point)))
+      (unless pabbrev-expand-confirmed
+        (setq pabbrev-suggestions-best-suggestion
+              (ring-ref pabbrev-cycle-suggestions pabbrev--ring-index)))
+      (setf pabbrev--ring-index
+            (if (= pabbrev--ring-index (ring-length pabbrev-cycle-suggestions))
+                0
+              (1+ pabbrev--ring-index)))
+      ;; (setq pabbrev-suggestion
+      ;;       (ring-ref pabbrev--ring-index pabbrev-cycle-suggestions))
+      (pabbrev-insert-suggestion prefix pabbrev-cycle-suggestions)))
+   (t  (pabbrev-call-previous-key-binding))))
 
-(defvar pabbrev-debug-frame nil)
-(defun pabbrev-debug-frame ()
+(defsubst pabbrev-suggestions-subseq(sequence from to)
+  "Return subsequence from SEQUENCE starting FROM and ending with TO."
+  (cl-subseq sequence (min 0 from) (min (length sequence) to)))
+
+(defsubst pabbrev-suggestions-limit-alpha-sort (suggestions)
+  "Limit suggestions and sort."
+  (delq nil
+        (sort (pabbrev-suggestions-subseq suggestions 0 10)
+              (lambda(a b)
+                (string< (car a) (car b))))))
+
+(defun pabbrev-suggestions-select-default()
+  "Select the most commonly occuring string."
   (interactive)
-  (when (not pabbrev-debug-frame)
-      (setq pabbrev-debug-frame
-            (make-frame '((width . 30)
-                          (height . 30))))
-      (select-frame pabbrev-debug-frame)
-      (switch-to-buffer (pabbrev-debug-get-buffer))))
+  (when pabbrev-suggestions-best-suggestion
+    (pabbrev-suggestions-insert (car pabbrev-suggestions-best-suggestion))))
 
-(defun pabbrev-debug-frame-scroll ()
-  (save-excursion
-    (when pabbrev-debug-frame
-        (select-frame pabbrev-debug-frame)
-        (switch-to-buffer (pabbrev-debug-get-buffer))
-        (goto-char (point-max)))))
-
-(defface pabbrev-debug-display-label-face
-  '((t
-     (:underline "navy")))
-  "Font Lock mode face used to highlight suggestions")
-
-(defun pabbrev-debug-erase-all-overlays()
-  "Kill all visible overlays from the current buffer. "
+(defun pabbrev-suggestions-delete()
+  "Delete the last suggestion."
   (interactive)
-  (pabbrev-debug-remove-properties)
-  (mapcar
-   (lambda(overlay)
-     (when (eq 'pabbrev-debug-display-label-face
-               (overlay-get overlay 'face))
-       (delete-overlay overlay)))
-   (overlays-in (point-min) (point-max))))
+  (pabbrev-suggestions-insert pabbrev-expand-previous-word))
 
-(defun pabbrev-debug-show-all-properties()
-  "Show all existing markers.
-This can be rather slow."
+(defun pabbrev-suggestions-minimum()
+  "Select the maximally occuring substring."
   (interactive)
-  (goto-char (point-min))
-  (let ((on-mark-state nil)
-        (on-mark))
-    (while t
-      (setq on-mark (get-text-property (point) 'pabbrev-added))
-      (message "On line %s" (count-lines (point-min) (point)))
-      (cond
-       ;; just moved onto marked area
-       ((and on-mark (not on-mark-state))
-        (setq on-mark-state (point)))
-       ;; just moved off a marked area
-       ((and on-mark-state (not on-mark))
-        (overlay-put (make-overlay on-mark-state (point)) 'face 'underline)
-        (setq on-mark-state nil)))
-      (forward-char))))
+  (pabbrev-suggestions-insert
+   ;;(try-completion "" pabbrev-suggestions-done-suggestions)))
+   (try-completion
+    "" (pabbrev-suggestions-subseq pabbrev-suggestions-done-suggestions 0 10))))
 
-(defun pabbrev-debug-restart-idle-timer()
-  "Kill and restart the idle timers."
-  (interactive)
-  (pabbrev-debug-kill-idle-timer)
-  (pabbrev-ensure-idle-timer))
+(defun pabbrev-suggestions-insert(insertion)
+  "Actually insert the suggestion."
+  (let ((point))
+    (with-current-buffer
+        pabbrev-suggestions-from-buffer
+      (let ((bounds (pabbrev-bounds-of-thing-at-point)))
+        (delete-region (car bounds) (cdr bounds))
+        (insert insertion)
+        (setq point (point))))
+    ;;(pabbrev-suggestions-delete-window)
+    (when point (goto-char point))))
 
-(defun pabbrev-debug-kill-idle-timer()
-  "Kill the idle timers.
-Toggling `pabbrev-mode' will tend to turn them on again, as
-will `pabbrev-debug-restart-idle-timer'."
-  (interactive)
-  (when pabbrev-short-idle-timer      
-      (cancel-timer pabbrev-short-idle-timer)
-      (setq pabbrev-short-idle-timer nil))
-  (when pabbrev-long-idle-timer
-      (cancel-timer pabbrev-long-idle-timer)
-      (setq pabbrev-long-idle-timer nil)))
+
+;;; Pabbrev minor mode - display, and accepts abbreviations.
 
-(defsubst pabbrev-debug-clear()
-  (pabbrev-debug-clear-all-hashes)
-  (pabbrev-debug-remove-properties))
+;;;###autoload
+(define-minor-mode pabbrev-mode
+  "Toggle pabbrev mode.
+With arg, turn on Predicative Abbreviation mode if and only if arg is
+positive.
 
-(defun pabbrev-debug-remove-properties()
-  "Remove all the `pabbrev-added' properties from the buffer.
-This means all the words in the buffer will be open for addition
-to the dictionary."
-  (interactive)
-  (remove-text-properties (point-min) (point-max) '(pabbrev-added)))
+This mode is another abbreviation expansion mode somewhat like
+`dabbrev-expand', in that it looks through the current buffer for
+symbols that can complete the current symbol. Unlike `dabbrev-expand',
+it does this by discovering the words during the Emacs idle time, and
+places the results into data structures which enable very rapid
+extraction of expansions. The upshot of this is that it can offer
+suggestions as you type, without causing an unacceptable slow down.
 
-(defun pabbrev-debug-clear-hashes(&optional mode)
-  "Clear the dictionary for major mode MODE, or the current mode."
-  (interactive)
-  (unless mode (setq mode major-mode))
-  (setq pabbrev-prefix-hash-modes (delq mode pabbrev-prefix-hash-modes)
-        pabbrev-usage-hash-modes  (delq mode pabbrev-usage-hash-modes))
-  ;; help the GC a bit..
-  (when (pabbrev-get-usage-hash)
-      (clrhash (pabbrev-get-usage-hash))
-      (put mode 'pabbrev-usage-hash nil))
-  (when (pabbrev-get-prefix-hash)
-      (clrhash (pabbrev-get-prefix-hash))
-      (put mode 'pabbrev-get-prefix-hash nil)))
+There is an associated `global-pabbrev-mode' which turns on the mode
+on in all buffers.
+"
+  :global nil :lighter " Pabbrev"
+  :keymap
+  `(;; \t works in tty but gets overridden by the [tab] binding elsewhere.
+    ("\t" . pabbrev-cycle-suggestions)
+    ;; This is not needed since function-key-map remaps a `tab' into a \t.
+    ;;(define-key map [tab] #'pabbrev-expand-maybe)
+    ([return] . pabbrev-expand-maybe)
+    ([M-return] . pabbrev-cycle-suggestions)
+    ;; read-kbd-macro macro should not be required, but I can't overwrite
+    ;; modes that use [13] as the key-binding, paredit notably
+    (,(read-kbd-macro "\r" #'pabbrev-cycle-suggestions)))
+  (when (and pabbrev-mode buffer-read-only pabbrev-read-only-error)
+    ;; FIXME: Signaling an error makes no sense.  Just make it a `message'
+    ;; and get rid of pabbrev-read-only-error.  After all, the user can
+    ;; enable/disable read-only-mode after pabbrev-mode.
+    (message "Can not use pabbrev-mode in read only buffer"))
+  (cond
+   (pabbrev-mode
+    (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
+    (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t)
+    ;; Switch on the idle timer if required when the mode is switched on.
+    (pabbrev-ensure-idle-timer)
+    ;; Also run the idle timer function, to put some works in the
+    ;; dictionary.
+    (pabbrev-scavenge-some))
+   (t
+    (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
+    (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
 
-(defun pabbrev-debug-clear-all-hashes()
-  "Clear all hashes for all modes."
-  (interactive)
-  (mapcar #'pabbrev-debug-clear-hashes pabbrev-prefix-hash-modes))
+;;   (easy-mmode-define-minor-mode pabbrev-mode
+;;                              "Toggle pabbrev mode.
+;; This mode is an abbreviation expansion mode. It looks through the
+;; current buffer, and offers expansions based on the words already
+;; there.
+(defun some-test ()
+"Here go some doc test"
+)
+;;;###autoload
+(define-global-minor-mode global-pabbrev-mode
+  pabbrev-mode pabbrev-global-mode)
 
-(defun pabbrev-debug-print-hashes()
-  "Print the hashes for the current mode."
-  (interactive)
-  (let ((usage (pabbrev-get-usage-hash))
-        (prefix (pabbrev-get-prefix-hash)))
-    (switch-to-buffer (get-buffer-create "*pabbrev hash*"))
-    (erase-buffer)
-    (unless usage
-      (insert "Usage hash nil"))
-    (insert "Usage hash size "
-            (number-to-string
-             (hash-table-count usage)) "\n")
-    (if (not prefix)
-        (insert "Prefix hash nil")
-      (insert "Prefix hash size "
-              (number-to-string
-               (hash-table-count prefix)) "\n"))
-    (insert "Usage hash:\n")
-    (pabbrev-debug-print-hash usage)
-    (insert "Prefix hash:\n")
-    (pabbrev-debug-print-hash prefix)))
-
-(defun pabbrev-debug-print-hash(hash)
-  "Pretty print a hash."
-  (when hash
-    (pp hash (current-buffer))
-    (insert "\n")
-    (insert (hash-table-count hash))
-    (insert "\n")
-    (maphash
-     (lambda(key value)
-       (insert (concat "KEY: " key "\n"))
-       (pp value (current-buffer)))
-     hash)))
-
-;; nobble pabbrev -- useful for profiling.
-;;
-;; nobble core data structures...
-;;(defun pabbrev-add-word(word))
-;;
-;; nobble text properties...
-;; (defun pabbrev-mark-add-word (bounds))
-
+(defun pabbrev-global-mode()
+  "Switch on `pabbrev-mode' in current buffer if appropriate.
+Currently appropriate means, if the buffer is not read only, and is
+not a minibuffer."
+  (unless (or buffer-read-only
+              pabbrev-mode
+              (get major-mode 'pabbrev-global-mode-excluded-modes)
+              ;; don't turn on in non listable buffers
+              (equal (substring (buffer-name) 0 1) " ")
+              (when pabbrev-global-mode-buffer-size-limit
+                (> (buffer-size) pabbrev-global-mode-buffer-size-limit))
+              (member (buffer-name) pabbrev-global-mode-not-buffer-names)
+              (window-minibuffer-p (selected-window)))
+    (let
+        ;; set the chunk size low, or the global mode takes for ever
+        ;; to switch on
+        ((pabbrev-scavenge-some-chunk-size 0))
+      (pabbrev-mode))))
+
 (provide 'pabbrev)
 ;;; pabbrev.el ends here
