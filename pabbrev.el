@@ -342,10 +342,8 @@ I'm not telling you which version, I prefer."
 
 
 ;;;; End user Customizable variables.
-
-
 
-;;;; Begin Package Support.
+;;; Package Support.
 
 ;; mark commands after which expansion should be offered
 (mapc
@@ -372,8 +370,8 @@ I'm not telling you which version, I prefer."
    gnus-article-mode))
 
 ;;;; End Package Support
-
-;;; Start data structures
+
+;;; Data structures
 (defvar pabbrev-usage-hash-modes nil
   "List of modes with associated usage dictionaries.")
 
@@ -396,6 +394,8 @@ would be irritating in the extreme.")
 (defvar pabbrev-short-idle-timer nil
   "Timer which adds a few words.
 See `pabbrev-long-idle-timer'.")
+
+(defvar pabbrev-mode nil) ; forward declare to silence byte compiler
 
 (defun pabbrev-get-usage-hash()
   "Return the usage hash for this buffer."
@@ -513,21 +513,180 @@ it's ordering is part of the core data structures"
   (gethash prefix (pabbrev-get-prefix-hash)))
 ;; Which completes the core data structures.
 
-;; This code provides the minor mode which displays, and accepts
-;; abbreviations.
-(defvar pabbrev-mode-map
-  (let ((map (make-sparse-keymap)))
+
+;;; Debug functions.
+(defvar pabbrev-debug-buffer nil)
 
-    ;; It should be possible to reconfigure this now, although there is special
-    ;; handling in `pabbrev-get-previous-binding' for tab and return and this
-    ;; might be needed for other bindings also.
+;;(setq pabbrev-debug-enabled t)
+(defvar pabbrev-debug-enabled nil)
 
-    ;; \t works in tty but gets overridden by the [tab] binding elsewhere.
-    (define-key map "\t" #'pabbrev-expand-maybe)
-    ;; This is not needed since function-key-map remaps a `tab' into a \t.
-    ;;(define-key map [tab] #'pabbrev-expand-maybe)
-    map)
-  "Keymap for pabbrev-minor-mode.")
+(defun pabbrev-debug()
+  (interactive)
+  (pabbrev-debug-frame)
+  (setq pabbrev-debug-enabled t))
+
+(defsubst pabbrev-debug-get-buffer()
+  (get-buffer-create "*pabbrev-debug"))
+
+(defvar pabbrev-debug-frame nil)
+(defun pabbrev-debug-frame ()
+  (interactive)
+  (when (not pabbrev-debug-frame)
+      (setq pabbrev-debug-frame
+            (make-frame '((width . 30)
+                          (height . 30))))
+      (select-frame pabbrev-debug-frame)
+      (switch-to-buffer (pabbrev-debug-get-buffer))))
+
+(defun pabbrev-debug-frame-scroll ()
+  (save-excursion
+    (when pabbrev-debug-frame
+        (select-frame pabbrev-debug-frame)
+        (switch-to-buffer (pabbrev-debug-get-buffer))
+        (goto-char (point-max)))))
+
+(defmacro pabbrev-debug-message(&rest body)
+  `(when pabbrev-debug-enabled
+     (let ((insert (concat (format ,@body) "\n")))
+       (with-current-buffer (pabbrev-debug-get-buffer)
+         (goto-char (point-max))
+         (insert insert)
+         (pabbrev-debug-frame-scroll)))))
+
+(defface pabbrev-debug-display-label-face
+  '((t
+     (:underline "navy")))
+  "Font Lock mode face used to highlight suggestions")
+
+(defun pabbrev-debug-erase-all-overlays()
+  "Kill all visible overlays from the current buffer. "
+  (interactive)
+  (pabbrev-debug-remove-properties)
+  (mapcar
+   (lambda(overlay)
+     (when (eq 'pabbrev-debug-display-label-face
+               (overlay-get overlay 'face))
+       (delete-overlay overlay)))
+   (overlays-in (point-min) (point-max))))
+
+(defun pabbrev-debug-show-all-properties()
+  "Show all existing markers.
+This can be rather slow."
+  (interactive)
+  (goto-char (point-min))
+  (let ((on-mark-state nil)
+        (on-mark))
+    (while t
+      (setq on-mark (get-text-property (point) 'pabbrev-added))
+      (message "On line %s" (count-lines (point-min) (point)))
+      (cond
+       ;; just moved onto marked area
+       ((and on-mark (not on-mark-state))
+        (setq on-mark-state (point)))
+       ;; just moved off a marked area
+       ((and on-mark-state (not on-mark))
+        (overlay-put (make-overlay on-mark-state (point)) 'face 'underline)
+        (setq on-mark-state nil)))
+      (forward-char))))
+
+(defun pabbrev-debug-restart-idle-timer()
+  "Kill and restart the idle timers."
+  (interactive)
+  (pabbrev-debug-kill-idle-timer)
+  (pabbrev-ensure-idle-timer))
+
+(defun pabbrev-debug-kill-idle-timer()
+  "Kill the idle timers.
+Toggling `pabbrev-mode' will tend to turn them on again, as
+will `pabbrev-debug-restart-idle-timer'."
+  (interactive)
+  (when pabbrev-short-idle-timer      
+      (cancel-timer pabbrev-short-idle-timer)
+      (setq pabbrev-short-idle-timer nil))
+  (when pabbrev-long-idle-timer
+      (cancel-timer pabbrev-long-idle-timer)
+      (setq pabbrev-long-idle-timer nil)))
+
+(defsubst pabbrev-debug-clear()
+  (pabbrev-debug-clear-all-hashes)
+  (pabbrev-debug-remove-properties))
+
+(defun pabbrev-debug-remove-properties()
+  "Remove all the `pabbrev-added' properties from the buffer.
+This means all the words in the buffer will be open for addition
+to the dictionary."
+  (interactive)
+  (remove-text-properties (point-min) (point-max) '(pabbrev-added)))
+
+(defun pabbrev-debug-clear-hashes(&optional mode)
+  "Clear the dictionary for major mode MODE, or the current mode."
+  (interactive)
+  (unless mode (setq mode major-mode))
+  (setq pabbrev-prefix-hash-modes (delq mode pabbrev-prefix-hash-modes)
+        pabbrev-usage-hash-modes  (delq mode pabbrev-usage-hash-modes))
+  ;; help the GC a bit..
+  (when (pabbrev-get-usage-hash)
+      (clrhash (pabbrev-get-usage-hash))
+      (put mode 'pabbrev-usage-hash nil))
+  (when (pabbrev-get-prefix-hash)
+      (clrhash (pabbrev-get-prefix-hash))
+      (put mode 'pabbrev-get-prefix-hash nil)))
+
+(defun pabbrev-debug-clear-all-hashes()
+  "Clear all hashes for all modes."
+  (interactive)
+  (mapcar #'pabbrev-debug-clear-hashes pabbrev-prefix-hash-modes))
+
+(defun pabbrev-debug-print-hashes()
+  "Print the hashes for the current mode."
+  (interactive)
+  (let ((usage (pabbrev-get-usage-hash))
+        (prefix (pabbrev-get-prefix-hash)))
+    (switch-to-buffer (get-buffer-create "*pabbrev hash*"))
+    (erase-buffer)
+    (unless usage
+      (insert "Usage hash nil"))
+    (insert "Usage hash size "
+            (number-to-string
+             (hash-table-count usage)) "\n")
+    (if (not prefix)
+        (insert "Prefix hash nil")
+      (insert "Prefix hash size "
+              (number-to-string
+               (hash-table-count prefix)) "\n"))
+    (insert "Usage hash:\n")
+    (pabbrev-debug-print-hash usage)
+    (insert "Prefix hash:\n")
+    (pabbrev-debug-print-hash prefix)))
+
+(defun pabbrev-debug-print-hash(hash)
+  "Pretty print a hash."
+  (when hash
+    (pp hash (current-buffer))
+    (insert "\n")
+    (insert (hash-table-count hash))
+    (insert "\n")
+    (maphash
+     (lambda(key value)
+       (insert (concat "KEY: " key "\n"))
+       (pp value (current-buffer)))
+     hash)))
+
+;; nobble pabbrev -- useful for profiling.
+;;
+;; nobble core data structures...
+;;(defun pabbrev-add-word(word))
+;;
+;; nobble text properties...
+;; (defun pabbrev-mark-add-word (bounds))
+
+;;; Scavenge functionality
+;; These functions define movement around the buffer, which
+;; determines what pabbrev considers to be a "word"
+(defun pabbrev-forward-thing(&optional number)
+  "Move forward a pabbrev word. Or backwards if number -1"
+  (interactive)
+  (forward-thing pabbrev-thing-at-point-constituent number))
 
 (defsubst pabbrev-bounds-of-thing-at-point()
   "Get the bounds of the thing at point"
@@ -550,72 +709,205 @@ it's ordering is part of the core data structures"
                   pabbrev-long-idle-timer))
         (pabbrev-start-idle-timer))))
 
-;;;###autoload
-(define-minor-mode pabbrev-mode
-  "Toggle pabbrev mode.
-With arg, turn on Predicative Abbreviation mode if and only if arg is
-positive.
+;; These functions deal with scavenging word usage from the buffer,
+;; which are then added to the dictionary.
+(defun pabbrev-bounds-marked-p (start end)
+  "Return t if anywhere between START and END is marked."
+  (save-excursion
+    (let ((retn))
+      (cl-do ((i start (1+ i)))
+          ((> i end))
+        (when (setq retn (get-text-property i 'pabbrev-added))
+          (setq i end)))
+      retn)))
 
-This mode is another abbreviation expansion mode somewhat like
-`dabbrev-expand', in that it looks through the current buffer for
-symbols that can complete the current symbol. Unlike `dabbrev-expand',
-it does this by discovering the words during the Emacs idle time, and
-places the results into data structures which enable very rapid
-extraction of expansions. The upshot of this is that it can offer
-suggestions as you type, without causing an unacceptable slow down.
+;;(setq pabbrev-debug-display t)
+(defvar pabbrev-debug-display nil
+  "If t visible mark the progress of function `pabbrev-mode' through the buffer.
+This looks very ugly.  Note that this only shows newly added words.  Use
+`pabbrev-debug-remove-properties' to clear this invisible markers.  Use
+`pabbrev-debug-show-all-properties' to show existing markers.")
 
-There is an associated `global-pabbrev-mode' which turns on the mode
-on in all buffers.
-"
-  :global nil
-  :lighter " Pabbrev"
-  :keymap pabbrev-mode-map
-  (when (and pabbrev-mode buffer-read-only pabbrev-read-only-error)
-    ;; FIXME: Signaling an error makes no sense.  Just make it a `message'
-    ;; and get rid of pabbrev-read-only-error.  After all, the user can
-    ;; enable/disable read-only-mode after pabbrev-mode.
-    (message "Can not use pabbrev-mode in read only buffer"))
-  (cond
-   (pabbrev-mode
-    (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
-    (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t)
-    ;; Switch on the idle timer if required when the mode is switched on.
-    (pabbrev-ensure-idle-timer)
-    ;; Also run the idle timer function, to put some works in the
-    ;; dictionary.
-    (pabbrev-scavenge-some))
-   (t
-    (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
-    (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
+(defsubst pabbrev-debug-display (start end)
+  (when pabbrev-debug-display
+    (overlay-put
+     (make-overlay start end)
+     'face 'pabbrev-debug-display-label-face)))
 
-;;   (easy-mmode-define-minor-mode pabbrev-mode
-;;                              "Toggle pabbrev mode.
-;; This mode is an abbreviation expansion mode. It looks through the
-;; current buffer, and offers expansions based on the words already
-;; there.
+(defun pabbrev-mark-add-word (bounds)
+  "Add word in BOUNDS as abbreviation, and mark the buffer."
+  (when bounds
+    (let ((start (car bounds))
+          (end (cdr bounds)))
+      (unless
+          ;; is this word or part of it already added?
+          (pabbrev-bounds-marked-p start end)
+        ;; mark the word visibly as well.
+        (pabbrev-debug-display start end)
+        ;; set a property so that we know what we have done.
+        (with-silent-modifications
+          (add-text-properties start end '(pabbrev-added t)))
+        ;; and add the word to the system.
+        (pabbrev-add-word
+         (buffer-substring-no-properties start end))))))
 
-;;;###autoload
-(define-global-minor-mode global-pabbrev-mode
-  pabbrev-mode pabbrev-global-mode)
+(defun pabbrev-scavenge-some()
+  "Gather some words up from around point"
+  (interactive)
+  (save-excursion
+    ;; move somewhat away from point, as this is likely to not contain
+    ;; complete words.
+    (pabbrev-forward-thing -2)
+    (pabbrev-scavenge-words -1 (* 2 pabbrev-scavenge-some-chunk-size))
+    (save-excursion
+      (pabbrev-forward-thing 2)
+      (pabbrev-scavenge-words 1 pabbrev-scavenge-some-chunk-size))))
 
-(defun pabbrev-global-mode()
-  "Switch on `pabbrev-mode' in current buffer if appropriate.
-Currently appropriate means, if the buffer is not read only, and is
-not a minibuffer."
-  (unless (or buffer-read-only
-              pabbrev-mode
-              (get major-mode 'pabbrev-global-mode-excluded-modes)
-              ;; don't turn on in non listable buffers
-              (equal (substring (buffer-name) 0 1) " ")
-              (when pabbrev-global-mode-buffer-size-limit
-                (> (buffer-size) pabbrev-global-mode-buffer-size-limit))
-              (member (buffer-name) pabbrev-global-mode-not-buffer-names)
-              (window-minibuffer-p (selected-window)))
-    (let
-        ;; set the chunk size low, or the global mode takes for ever
-        ;; to switch on
-        ((pabbrev-scavenge-some-chunk-size 0))
-      (pabbrev-mode))))
+(defun pabbrev-scavenge-region()
+  (interactive)
+  (narrow-to-region (region-beginning) (region-end))
+  (pabbrev-scavenge-buffer))
+
+(defun pabbrev-scavenge-buffer-fast()
+  (interactive)
+  (message "pabbrev fast scavenging buffer...")
+  (save-excursion
+    (goto-char (point-min))
+    (while (pabbrev-forward-thing)
+      (let* ((bounds (pabbrev-bounds-of-thing-at-point))
+             (start (car bounds))
+             (stop (cdr bounds)))
+        (unless (pabbrev-bounds-marked-p start stop)
+          (pabbrev-add-word
+           (buffer-substring-no-properties start stop)))))
+
+    (pabbrev-debug-message "Dictionary size %s total usage %s"
+                           (pabbrev-get-usage-dictionary-size)
+                           (pabbrev-get-total-usages-dictionary))
+    (with-silent-modifications
+     (add-text-properties (point-min) (point-max) '(pabbrev-added t)))
+    (message "pabbrev fast scavenging buffer...done.")))
+
+(defun pabbrev-scavenge-buffer()
+  (interactive)
+  (save-excursion
+    (goto-char (point-min))
+    (let ((pr (make-progress-reporter "pabbrev scavenging buffer"
+                                      (point) (point-max))))
+      (while (pabbrev-forward-thing)
+        (progress-reporter-update pr (point))
+        (pabbrev-mark-add-word
+         (pabbrev-bounds-of-thing-at-point)))
+      (progress-reporter-done pr))
+    (pabbrev-debug-message "Dictionary size %s total usage %s"
+                           (pabbrev-get-usage-dictionary-size)
+                           (pabbrev-get-total-usages-dictionary))
+    (message "pabbrev scavenging buffer...done.")))
+
+(defun pabbrev-scavenge-words(&optional direction number)
+  "Scavenge words from current buffer, starting from point.
+DIRECTION is in which direction we should work,
+NUMBER is how many words we should try to scavenge"
+  (unless direction (setq direction 1))
+  (unless number (setq number 20))
+  (save-excursion
+    (dotimes (_ number)
+      (pabbrev-forward-thing direction)
+      (pabbrev-mark-add-word
+       (pabbrev-bounds-of-thing-at-point)))
+    (point)))
+
+;;(setq  pabbrev-disable-timers t)
+(defvar pabbrev-disable-timers nil)
+;; I don't understand why this is necessary but it seems to help the
+;; slow idle timer work in the correct buffer. I suspect someother
+;; timer is screwing up with the current buffer...
+(defvar pabbrev-timer-buffer nil)
+
+(defun pabbrev-short-idle-timer(&optional buffer)
+  "Add a few words to the dictionary."
+  (with-current-buffer
+      (or buffer (current-buffer))
+    ;; remember which buffer we have just looked at.
+    (setq pabbrev-timer-buffer (current-buffer))
+    (when (and pabbrev-mode (not pabbrev-disable-timers))
+      (pabbrev-debug-message "running short idle timer")
+      ;;(message "Running short timer in %s" (current-buffer))
+
+      (pabbrev-scavenge-some)
+      (pabbrev-debug-message "Dictionary size %s total usage %s"
+                             (pabbrev-get-usage-dictionary-size)
+                             (pabbrev-get-total-usages-dictionary)))))
+
+(defun pabbrev-idle-timer-function(&optional buffer)
+  ;; so this only works on the current buffer. Might want to scavenge
+  ;; over other buffers
+  (when-let ((first-live-b
+              (seq-find
+               #'buffer-live-p
+               (list buffer pabbrev-timer-buffer (current-buffer)))))
+    (with-current-buffer first-live-b
+      (if (and pabbrev-mode (not pabbrev-disable-timers))
+          (pabbrev-idle-timer-function-0)
+        (pabbrev-debug-message "idle running in non pabbrev-mode")))))
+
+;; for some reason that I do not understand yet, this sometimes
+;; appears to work in the wrong buffer. I really have not got any idea
+;; why this is the case.
+(defun pabbrev-idle-timer-function-0()
+  "Add all words to the buffer.
+
+`pabbrev-scavenge-buffer' does this more efficiently interactively.
+If it up too much processor power, see `pabbrev-scavenge-some-chunk-size'."
+  (let ((forward-marker (point))
+        (backward-marker (point))
+        (forward-complete nil)
+        (backward-complete nil)
+        (repeat t))
+    (when pabbrev-idle-timer-verbose
+      (message "pabbrev scavenging..."))
+    (pabbrev-debug-message "running idle timer at %s" (point))
+    (while (and repeat
+                (not (and forward-complete backward-complete)))
+      (save-excursion
+        (unless backward-complete
+          (goto-char backward-marker)
+          (setq backward-marker
+                (pabbrev-scavenge-words -1
+                                        (* 2 pabbrev-scavenge-some-chunk-size)))
+          (setq backward-complete
+                (eq (point-min) backward-marker))
+          (pabbrev-debug-message "searching backward to %s complete %s"
+                                 backward-marker backward-complete))
+        (unless forward-complete
+          (goto-char forward-marker)
+          (setq forward-marker
+                (pabbrev-scavenge-words 1 pabbrev-scavenge-some-chunk-size))
+          (setq forward-complete
+                (eq (point-max) forward-marker))
+          (pabbrev-debug-message "searching forward to %s complete %s"
+                                 forward-marker forward-complete)))
+      (pabbrev-debug-message "Dictionary size %s total usage %s"
+                             (pabbrev-get-usage-dictionary-size)
+                             (pabbrev-get-total-usages-dictionary))
+
+      (when pabbrev-idle-timer-verbose
+        (message "pabbrev scavenging (%s words %s buffer)..."
+                 (pabbrev-get-usage-dictionary-size)
+                 (buffer-name (current-buffer))))
+      (setq repeat (sit-for 0.1)))
+    (when pabbrev-idle-timer-verbose
+      (message "pabbrev scavenging...done")
+      (sit-for 2)
+      (message nil))))
+
+(defun pabbrev-shut-up()
+  "Switch off verbose messages..."
+  (interactive)
+  (message "Swiching off pabbrev messages" )
+  (setq pabbrev-idle-timer-verbose nil))
+
+;;; Suggestions handling
 
 (defvar-local pabbrev-marker nil
   "Location of current insertion, or nil.
@@ -736,9 +1028,6 @@ anything. Toggling it off, and then on again will usually restore functionality.
   (select-window (get-buffer-window "*pabbrev-fail*"))
   (error "Error in pabbrev-mode"))
 
-(defsubst pabbrev-debug-get-buffer()
-  (get-buffer-create "*pabbrev-debug"))
-
 (defsubst pabbrev-marker-last-expansion()
   "Fetch marker for last offered expansion."
   (or pabbrev-marker-last-expansion
@@ -747,15 +1036,6 @@ anything. Toggling it off, and then on again will usually restore functionality.
 
 (defsubst pabbrev-update-marker()
   (set-marker (pabbrev-marker-last-expansion) (point) (current-buffer)))
-
-(defvar pabbrev-debug-enabled nil)
-(defmacro pabbrev-debug-message(&rest body)
-  `(when pabbrev-debug-enabled
-     (let ((insert (concat (format ,@body) "\n")))
-       (with-current-buffer (pabbrev-debug-get-buffer)
-         (goto-char (point-max))
-         (insert insert)
-         (pabbrev-debug-frame-scroll)))))
 
 (defun pabbrev-post-command-check-movement()
   (let ((distance
@@ -1107,366 +1387,90 @@ matching substring, while \\[pabbrev-suggestions-delete-window] just deletes the
     (when (< insert-index (length pabbrev-suggestions-done-suggestions))
       (pabbrev-suggestions-insert
        (car (nth insert-index pabbrev-suggestions-done-suggestions))))))
-
-;; These functions define movement around the buffer, which
-;; determines what pabbrev considers to be a "word"
-(defun pabbrev-forward-thing(&optional number)
-  "Move forward a pabbrev word. Or backwards if number -1"
-  (interactive)
-  (forward-thing pabbrev-thing-at-point-constituent number))
-
-;; These functions deal with scavenging word usage from the buffer,
-;; which are then added to the dictionary.
-(defun pabbrev-bounds-marked-p (start end)
-  "Return t if anywhere between START and END is marked."
-  (save-excursion
-    (let ((retn))
-      (cl-do ((i start (1+ i)))
-          ((> i end))
-        (when (setq retn (get-text-property i 'pabbrev-added))
-          (setq i end)))
-      retn)))
-
-;;(setq pabbrev-debug-display t)
-(defvar pabbrev-debug-display nil
-  "If t visible mark the progress of function `pabbrev-mode' through the buffer.
-This looks very ugly.  Note that this only shows newly added words.  Use
-`pabbrev-debug-remove-properties' to clear this invisible markers.  Use
-`pabbrev-debug-show-all-properties' to show existing markers.")
-
-(defsubst pabbrev-debug-display (start end)
-  (when pabbrev-debug-display
-    (overlay-put
-     (make-overlay start end)
-     'face 'pabbrev-debug-display-label-face)))
-
-(defun pabbrev-mark-add-word (bounds)
-  "Add word in BOUNDS as abbreviation, and mark the buffer."
-  (when bounds
-    (let ((start (car bounds))
-          (end (cdr bounds)))
-      (unless
-          ;; is this word or part of it already added?
-          (pabbrev-bounds-marked-p start end)
-        ;; mark the word visibly as well.
-        (pabbrev-debug-display start end)
-        ;; set a property so that we know what we have done.
-        (with-silent-modifications
-          (add-text-properties start end '(pabbrev-added t)))
-        ;; and add the word to the system.
-        (pabbrev-add-word
-         (buffer-substring-no-properties start end))))))
-
-(defun pabbrev-scavenge-some()
-  "Gather some words up from around point"
-  (interactive)
-  (save-excursion
-    ;; move somewhat away from point, as this is likely to not contain
-    ;; complete words.
-    (pabbrev-forward-thing -2)
-    (pabbrev-scavenge-words -1 (* 2 pabbrev-scavenge-some-chunk-size))
-    (save-excursion
-      (pabbrev-forward-thing 2)
-      (pabbrev-scavenge-words 1 pabbrev-scavenge-some-chunk-size))))
-
-(defun pabbrev-scavenge-region()
-  (interactive)
-  (narrow-to-region (region-beginning) (region-end))
-  (pabbrev-scavenge-buffer))
-
-(defun pabbrev-scavenge-buffer-fast()
-  (interactive)
-  (message "pabbrev fast scavenging buffer...")
-  (save-excursion
-    (goto-char (point-min))
-    (while (pabbrev-forward-thing)
-      (let* ((bounds (pabbrev-bounds-of-thing-at-point))
-             (start (car bounds))
-             (stop (cdr bounds)))
-        (unless (pabbrev-bounds-marked-p start stop)
-          (pabbrev-add-word
-           (buffer-substring-no-properties start stop)))))
-
-    (pabbrev-debug-message "Dictionary size %s total usage %s"
-                           (pabbrev-get-usage-dictionary-size)
-                           (pabbrev-get-total-usages-dictionary))
-    (with-silent-modifications
-     (add-text-properties (point-min) (point-max) '(pabbrev-added t)))
-    (message "pabbrev fast scavenging buffer...done.")))
-
-(defun pabbrev-scavenge-buffer()
-  (interactive)
-  (save-excursion
-    (goto-char (point-min))
-    (let ((pr (make-progress-reporter "pabbrev scavenging buffer"
-                                      (point) (point-max))))
-      (while (pabbrev-forward-thing)
-        (progress-reporter-update pr (point))
-        (pabbrev-mark-add-word
-         (pabbrev-bounds-of-thing-at-point)))
-      (progress-reporter-done pr))
-    (pabbrev-debug-message "Dictionary size %s total usage %s"
-                           (pabbrev-get-usage-dictionary-size)
-                           (pabbrev-get-total-usages-dictionary))
-    (message "pabbrev scavenging buffer...done.")))
-
-(defun pabbrev-scavenge-words(&optional direction number)
-  "Scavenge words from current buffer, starting from point.
-DIRECTION is in which direction we should work,
-NUMBER is how many words we should try to scavenge"
-  (unless direction (setq direction 1))
-  (unless number (setq number 20))
-  (save-excursion
-    (dotimes (_ number)
-      (pabbrev-forward-thing direction)
-      (pabbrev-mark-add-word
-       (pabbrev-bounds-of-thing-at-point)))
-    (point)))
-
-;;(setq  pabbrev-disable-timers t)
-(defvar pabbrev-disable-timers nil)
-;; I don't understand why this is necessary but it seems to help the
-;; slow idle timer work in the correct buffer. I suspect someother
-;; timer is screwing up with the current buffer...
-(defvar pabbrev-timer-buffer nil)
-
-(defun pabbrev-short-idle-timer(&optional buffer)
-  "Add a few words to the dictionary."
-  (with-current-buffer
-      (or buffer (current-buffer))
-    ;; remember which buffer we have just looked at.
-    (setq pabbrev-timer-buffer (current-buffer))
-    (when (and pabbrev-mode (not pabbrev-disable-timers))
-      (pabbrev-debug-message "running short idle timer")
-      ;;(message "Running short timer in %s" (current-buffer))
-
-      (pabbrev-scavenge-some)
-      (pabbrev-debug-message "Dictionary size %s total usage %s"
-                             (pabbrev-get-usage-dictionary-size)
-                             (pabbrev-get-total-usages-dictionary)))))
-
-(defun pabbrev-idle-timer-function(&optional buffer)
-  ;; so this only works on the current buffer. Might want to scavenge
-  ;; over other buffers
-  (when-let ((first-live-b
-              (seq-find
-               #'buffer-live-p
-               (list buffer pabbrev-timer-buffer (current-buffer)))))
-    (with-current-buffer first-live-b
-      (if (and pabbrev-mode (not pabbrev-disable-timers))
-          (pabbrev-idle-timer-function-0)
-        (pabbrev-debug-message "idle running in non pabbrev-mode")))))
-
-;; for some reason that I do not understand yet, this sometimes
-;; appears to work in the wrong buffer. I really have not got any idea
-;; why this is the case.
-(defun pabbrev-idle-timer-function-0()
-  "Add all words to the buffer.
-
-`pabbrev-scavenge-buffer' does this more efficiently interactively.
-If it up too much processor power, see `pabbrev-scavenge-some-chunk-size'."
-  (let ((forward-marker (point))
-        (backward-marker (point))
-        (forward-complete nil)
-        (backward-complete nil)
-        (repeat t))
-    (when pabbrev-idle-timer-verbose
-      (message "pabbrev scavenging..."))
-    (pabbrev-debug-message "running idle timer at %s" (point))
-    (while (and repeat
-                (not (and forward-complete backward-complete)))
-      (save-excursion
-        (unless backward-complete
-          (goto-char backward-marker)
-          (setq backward-marker
-                (pabbrev-scavenge-words -1
-                                        (* 2 pabbrev-scavenge-some-chunk-size)))
-          (setq backward-complete
-                (eq (point-min) backward-marker))
-          (pabbrev-debug-message "searching backward to %s complete %s"
-                                 backward-marker backward-complete))
-        (unless forward-complete
-          (goto-char forward-marker)
-          (setq forward-marker
-                (pabbrev-scavenge-words 1 pabbrev-scavenge-some-chunk-size))
-          (setq forward-complete
-                (eq (point-max) forward-marker))
-          (pabbrev-debug-message "searching forward to %s complete %s"
-                                 forward-marker forward-complete)))
-      (pabbrev-debug-message "Dictionary size %s total usage %s"
-                             (pabbrev-get-usage-dictionary-size)
-                             (pabbrev-get-total-usages-dictionary))
-
-      (when pabbrev-idle-timer-verbose
-        (message "pabbrev scavenging (%s words %s buffer)..."
-                 (pabbrev-get-usage-dictionary-size)
-                 (buffer-name (current-buffer))))
-      (setq repeat (sit-for 0.1)))
-    (when pabbrev-idle-timer-verbose
-      (message "pabbrev scavenging...done")
-      (sit-for 2)
-      (message nil))))
-
-(defun pabbrev-shut-up()
-  "Switch off verbose messages..."
-  (interactive)
-  (message "Swiching off pabbrev messages" )
-  (setq pabbrev-idle-timer-verbose nil))
 
-;;; The following are debug functions.
-(defvar pabbrev-debug-buffer nil)
+;;; Pabbrev minor mode - display, and accepts abbreviations.
+;; This code provides the minor mode which displays, and accepts
+;; abbreviations.
+(defvar pabbrev-mode-map
+  (let ((map (make-sparse-keymap)))
 
-;;(setq pabbrev-debug-enabled t)
-(defvar pabbrev-debug-enabled nil)
+    ;; It should be possible to reconfigure this now, although there is special
+    ;; handling in `pabbrev-get-previous-binding' for tab and return and this
+    ;; might be needed for other bindings also.
 
-(defun pabbrev-debug()
-  (interactive)
-  (pabbrev-debug-frame)
-  (setq pabbrev-debug-enabled t))
+    ;; \t works in tty but gets overridden by the [tab] binding elsewhere.
+    (define-key map "\t" #'pabbrev-expand-maybe)
+    ;; This is not needed since function-key-map remaps a `tab' into a \t.
+    ;;(define-key map [tab] #'pabbrev-expand-maybe)
+    map)
+  "Keymap for pabbrev-minor-mode.")
 
-(defvar pabbrev-debug-frame nil)
-(defun pabbrev-debug-frame ()
-  (interactive)
-  (when (not pabbrev-debug-frame)
-      (setq pabbrev-debug-frame
-            (make-frame '((width . 30)
-                          (height . 30))))
-      (select-frame pabbrev-debug-frame)
-      (switch-to-buffer (pabbrev-debug-get-buffer))))
+;;;###autoload
+(define-minor-mode pabbrev-mode
+  "Toggle pabbrev mode.
+With arg, turn on Predicative Abbreviation mode if and only if arg is
+positive.
 
-(defun pabbrev-debug-frame-scroll ()
-  (save-excursion
-    (when pabbrev-debug-frame
-        (select-frame pabbrev-debug-frame)
-        (switch-to-buffer (pabbrev-debug-get-buffer))
-        (goto-char (point-max)))))
+This mode is another abbreviation expansion mode somewhat like
+`dabbrev-expand', in that it looks through the current buffer for
+symbols that can complete the current symbol. Unlike `dabbrev-expand',
+it does this by discovering the words during the Emacs idle time, and
+places the results into data structures which enable very rapid
+extraction of expansions. The upshot of this is that it can offer
+suggestions as you type, without causing an unacceptable slow down.
 
-(defface pabbrev-debug-display-label-face
-  '((t
-     (:underline "navy")))
-  "Font Lock mode face used to highlight suggestions")
+There is an associated `global-pabbrev-mode' which turns on the mode
+on in all buffers.
+"
+  :global nil
+  :lighter " Pabbrev"
+  :keymap pabbrev-mode-map
+  (when (and pabbrev-mode buffer-read-only pabbrev-read-only-error)
+    ;; FIXME: Signaling an error makes no sense.  Just make it a `message'
+    ;; and get rid of pabbrev-read-only-error.  After all, the user can
+    ;; enable/disable read-only-mode after pabbrev-mode.
+    (message "Can not use pabbrev-mode in read only buffer"))
+  (cond
+   (pabbrev-mode
+    (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
+    (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t)
+    ;; Switch on the idle timer if required when the mode is switched on.
+    (pabbrev-ensure-idle-timer)
+    ;; Also run the idle timer function, to put some works in the
+    ;; dictionary.
+    (pabbrev-scavenge-some))
+   (t
+    (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
+    (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
 
-(defun pabbrev-debug-erase-all-overlays()
-  "Kill all visible overlays from the current buffer. "
-  (interactive)
-  (pabbrev-debug-remove-properties)
-  (mapcar
-   (lambda(overlay)
-     (when (eq 'pabbrev-debug-display-label-face
-               (overlay-get overlay 'face))
-       (delete-overlay overlay)))
-   (overlays-in (point-min) (point-max))))
+;;   (easy-mmode-define-minor-mode pabbrev-mode
+;;                              "Toggle pabbrev mode.
+;; This mode is an abbreviation expansion mode. It looks through the
+;; current buffer, and offers expansions based on the words already
+;; there.
 
-(defun pabbrev-debug-show-all-properties()
-  "Show all existing markers.
-This can be rather slow."
-  (interactive)
-  (goto-char (point-min))
-  (let ((on-mark-state nil)
-        (on-mark))
-    (while t
-      (setq on-mark (get-text-property (point) 'pabbrev-added))
-      (message "On line %s" (count-lines (point-min) (point)))
-      (cond
-       ;; just moved onto marked area
-       ((and on-mark (not on-mark-state))
-        (setq on-mark-state (point)))
-       ;; just moved off a marked area
-       ((and on-mark-state (not on-mark))
-        (overlay-put (make-overlay on-mark-state (point)) 'face 'underline)
-        (setq on-mark-state nil)))
-      (forward-char))))
+;;;###autoload
+(define-global-minor-mode global-pabbrev-mode
+  pabbrev-mode pabbrev-global-mode)
 
-(defun pabbrev-debug-restart-idle-timer()
-  "Kill and restart the idle timers."
-  (interactive)
-  (pabbrev-debug-kill-idle-timer)
-  (pabbrev-ensure-idle-timer))
-
-(defun pabbrev-debug-kill-idle-timer()
-  "Kill the idle timers.
-Toggling `pabbrev-mode' will tend to turn them on again, as
-will `pabbrev-debug-restart-idle-timer'."
-  (interactive)
-  (when pabbrev-short-idle-timer      
-      (cancel-timer pabbrev-short-idle-timer)
-      (setq pabbrev-short-idle-timer nil))
-  (when pabbrev-long-idle-timer
-      (cancel-timer pabbrev-long-idle-timer)
-      (setq pabbrev-long-idle-timer nil)))
-
-(defsubst pabbrev-debug-clear()
-  (pabbrev-debug-clear-all-hashes)
-  (pabbrev-debug-remove-properties))
-
-(defun pabbrev-debug-remove-properties()
-  "Remove all the `pabbrev-added' properties from the buffer.
-This means all the words in the buffer will be open for addition
-to the dictionary."
-  (interactive)
-  (remove-text-properties (point-min) (point-max) '(pabbrev-added)))
-
-(defun pabbrev-debug-clear-hashes(&optional mode)
-  "Clear the dictionary for major mode MODE, or the current mode."
-  (interactive)
-  (unless mode (setq mode major-mode))
-  (setq pabbrev-prefix-hash-modes (delq mode pabbrev-prefix-hash-modes)
-        pabbrev-usage-hash-modes  (delq mode pabbrev-usage-hash-modes))
-  ;; help the GC a bit..
-  (when (pabbrev-get-usage-hash)
-      (clrhash (pabbrev-get-usage-hash))
-      (put mode 'pabbrev-usage-hash nil))
-  (when (pabbrev-get-prefix-hash)
-      (clrhash (pabbrev-get-prefix-hash))
-      (put mode 'pabbrev-get-prefix-hash nil)))
-
-(defun pabbrev-debug-clear-all-hashes()
-  "Clear all hashes for all modes."
-  (interactive)
-  (mapcar #'pabbrev-debug-clear-hashes pabbrev-prefix-hash-modes))
-
-(defun pabbrev-debug-print-hashes()
-  "Print the hashes for the current mode."
-  (interactive)
-  (let ((usage (pabbrev-get-usage-hash))
-        (prefix (pabbrev-get-prefix-hash)))
-    (switch-to-buffer (get-buffer-create "*pabbrev hash*"))
-    (erase-buffer)
-    (unless usage
-      (insert "Usage hash nil"))
-    (insert "Usage hash size "
-            (number-to-string
-             (hash-table-count usage)) "\n")
-    (if (not prefix)
-        (insert "Prefix hash nil")
-      (insert "Prefix hash size "
-              (number-to-string
-               (hash-table-count prefix)) "\n"))
-    (insert "Usage hash:\n")
-    (pabbrev-debug-print-hash usage)
-    (insert "Prefix hash:\n")
-    (pabbrev-debug-print-hash prefix)))
-
-(defun pabbrev-debug-print-hash(hash)
-  "Pretty print a hash."
-  (when hash
-    (pp hash (current-buffer))
-    (insert "\n")
-    (insert (hash-table-count hash))
-    (insert "\n")
-    (maphash
-     (lambda(key value)
-       (insert (concat "KEY: " key "\n"))
-       (pp value (current-buffer)))
-     hash)))
-
-;; nobble pabbrev -- useful for profiling.
-;;
-;; nobble core data structures...
-;;(defun pabbrev-add-word(word))
-;;
-;; nobble text properties...
-;; (defun pabbrev-mark-add-word (bounds))
+(defun pabbrev-global-mode()
+  "Switch on `pabbrev-mode' in current buffer if appropriate.
+Currently appropriate means, if the buffer is not read only, and is
+not a minibuffer."
+  (unless (or buffer-read-only
+              pabbrev-mode
+              (get major-mode 'pabbrev-global-mode-excluded-modes)
+              ;; don't turn on in non listable buffers
+              (equal (substring (buffer-name) 0 1) " ")
+              (when pabbrev-global-mode-buffer-size-limit
+                (> (buffer-size) pabbrev-global-mode-buffer-size-limit))
+              (member (buffer-name) pabbrev-global-mode-not-buffer-names)
+              (window-minibuffer-p (selected-window)))
+    (let
+        ;; set the chunk size low, or the global mode takes for ever
+        ;; to switch on
+        ((pabbrev-scavenge-some-chunk-size 0))
+      (pabbrev-mode))))
 
 (provide 'pabbrev)
 ;;; pabbrev.el ends here
