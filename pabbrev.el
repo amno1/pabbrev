@@ -1245,6 +1245,17 @@ If it up too much processor power, see `pabbrev-scavenge-some-chunk-size'."
 (defvar pabbrev--cycle-start-p nil
   "Intern variable meaning the user is cycling suggestions.")
 
+(defun pabbrev-capf ()
+  "Complete suggestions at point."
+  (let* ((candidates (pabbrev-fetch-all-suggestions-for-prefix
+                      (pabbrev-thing-at-point)))
+         (bounds (pabbrev-bounds-of-thing-at-point))
+         (beg (car bounds))
+         (end (cdr bounds)))
+    (list beg end candidates
+          :exclusive 'no
+          :exit-function #'pabbrev-insert-suggestion)))
+
 (defun pabbrev-insert-suggestion(prefix suggestions)
   "Insert a suggestion into the buffer.
 The suggestion should start with PREFIX, and be entered at point."
@@ -1253,7 +1264,7 @@ The suggestion should start with PREFIX, and be entered at point."
            ((ring-p suggestions)
             (car (ring-ref suggestions pabbrev--ring-index)))
            ((not pabbrev-minimal-expansion-p)
-               (car (car suggestions)))
+            (car (car suggestions)))
            (t 
             (try-completion "" suggestions))))
          (length (if (ring-p suggestions)
@@ -1381,6 +1392,8 @@ on in all buffers.
     (message "Can not use pabbrev-mode in read only buffer"))
   (cond
    (pabbrev-mode
+    (add-hook 'completion-at-point-functions #'pabbrev-capf -90 t)
+    (add-to-list 'completion-at-point-functions #'pabbrev-capf)
     (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
     (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t)
     ;; Switch on the idle timer if required when the mode is switched on.
@@ -1389,6 +1402,8 @@ on in all buffers.
     ;; dictionary.
     (pabbrev-scavenge-some))
    (t
+    (remove-hook 'completion-at-point-functions #'pabbrev-capf)
+    (remove #'pabbrev-capf completion-at-point-functions)
     (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
     (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
 
@@ -1397,9 +1412,7 @@ on in all buffers.
 ;; This mode is an abbreviation expansion mode. It looks through the
 ;; current buffer, and offers expansions based on the words already
 ;; there.
-(defun some-test ()
-"Here go some doc test"
-)
+
 ;;;###autoload
 (define-global-minor-mode global-pabbrev-mode
   pabbrev-mode pabbrev-global-mode)
