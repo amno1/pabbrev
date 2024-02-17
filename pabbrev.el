@@ -1239,12 +1239,8 @@ If it up too much processor power, see `pabbrev-scavenge-some-chunk-size'."
   (interactive)
   (message "Swiching off pabbrev messages" )
   (setq pabbrev-idle-timer-verbose nil))
-
 
 ;;; Suggestions handling
-(defvar pabbrev--cycle-start-p nil
-  "Intern variable meaning the user is cycling suggestions.")
-
 (defun pabbrev-insert-suggestion(prefix suggestions)
   "Insert a suggestion into the buffer.
 The suggestion should start with PREFIX, and be entered at point."
