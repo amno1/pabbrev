@@ -1252,9 +1252,7 @@ If it up too much processor power, see `pabbrev-scavenge-some-chunk-size'."
          (bounds (pabbrev-bounds-of-thing-at-point))
          (beg (car bounds))
          (end (cdr bounds)))
-    (list beg end candidates
-          :exclusive 'no
-          :exit-function #'pabbrev-insert-suggestion)))
+    (list beg end candidates)))
 
 (defun pabbrev-insert-suggestion(prefix suggestions)
   "Insert a suggestion into the buffer.
@@ -1287,7 +1285,8 @@ The suggestion should start with PREFIX, and be entered at point."
                     (propertize "[" 'cursor 1)
                     (propertize expansion
                                 'face (overlay-get pabbrev-overlay 'face))
-                    "]")))))
+                    "]"))
+      suggestion)))
 
 (defun pabbrev-cycle-suggestions ()
   "Return next suggestion from the suggestions list."
