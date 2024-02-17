@@ -1247,12 +1247,10 @@ If it up too much processor power, see `pabbrev-scavenge-some-chunk-size'."
 
 (defun pabbrev-capf ()
   "Complete suggestions at point."
-  (let* ((candidates (pabbrev-fetch-all-suggestions-for-prefix
-                      (pabbrev-thing-at-point)))
-         (bounds (pabbrev-bounds-of-thing-at-point))
-         (beg (car bounds))
-         (end (cdr bounds)))
-    (list beg end candidates)))
+  (let ((candidates (pabbrev-fetch-all-suggestions-for-prefix
+                     (pabbrev-thing-at-point)))
+         (bounds (pabbrev-bounds-of-thing-at-point)))
+    (list (car bounds) (cdr bounds) candidates)))
 
 (defun pabbrev-insert-suggestion(prefix suggestions)
   "Insert a suggestion into the buffer.
