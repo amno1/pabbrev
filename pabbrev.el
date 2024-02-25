@@ -316,6 +316,24 @@ completion seen on a command line.
 I'm not telling you which version, I prefer."
   :type 'boolean)
 
+(defcustom pabbrev-overlay-decorators "[]"
+  "Left and right decorator for suggestions overlay.
+ode
+Should be a string of two printable characters, the first one for left
+  decorationa and the second one for the right decoration. Nil means to not
+  decorate at all"
+  :type 'string
+  :set
+  (lambda (var val)
+    (message "VV: %S %S" var val)
+    (let ((v (if (and val
+                  (stringp val)
+                  (= 2 (length val))
+                  (aref printable-chars (aref val 0))
+                  (aref printable-chars (aref val 1)))
+             val)))
+      (set var v))))
+
 ;;(setq pabbrev-minimal-expansion-p t)
 
 ;; stolen from font-lock!
@@ -926,6 +944,18 @@ start and end positions")
 (defvar-local pabbrev-overlay nil
   "Overlay for offered completion.")
 
+(defun pabbrev--left-decorator ()
+  "Return left decoration for the suggestion overlay."
+  (if pabbrev-overlay-decorators
+      (char-to-string (aref pabbrev-overlay-decorators 0))
+    ""))
+
+(defun pabbrev--right-decorator ()
+  "Return right decoration for the suggestion overlay."
+  (if pabbrev-overlay-decorators
+      (char-to-string (aref pabbrev-overlay-decorators 1))
+    ""))
+
 (defsubst pabbrev-delete-overlay()
   "Make overlay invisible."
   (when pabbrev-overlay
@@ -1081,10 +1111,10 @@ The suggestion should start with PREFIX, and be entered at point."
       (overlay-put pabbrev-overlay
                    'after-string
                    (concat
-                    (propertize "[" 'cursor 1)
+                    (propertize (pabbrev--left-decorator) 'cursor 1)
                     (propertize expansion
                                 'face (overlay-get pabbrev-overlay 'face))
-                    "]")))))
+                    (pabbrev--right-decorator))))))
 
 (defvar pabbrev-last-expansion-suggestions nil
   "Cached alternative suggestions from the last expansion.")
