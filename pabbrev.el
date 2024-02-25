@@ -325,13 +325,12 @@ Should be a string of two printable characters, the first one for left
   :type 'string
   :set
   (lambda (var val)
-    (message "VV: %S %S" var val)
-    (let ((v (if (and val
-                  (stringp val)
-                  (= 2 (length val))
-                  (aref printable-chars (aref val 0))
-                  (aref printable-chars (aref val 1)))
-             val)))
+    (let ((v (if (and (stringp val)
+                      (= 2 (length val))
+                      (aref printable-chars (aref val 0))
+                      (aref printable-chars (aref val 1)))
+                 val
+               "")))
       (set var v))))
 
 ;;(setq pabbrev-minimal-expansion-p t)
@@ -946,15 +945,15 @@ start and end positions")
 
 (defun pabbrev--left-decorator ()
   "Return left decoration for the suggestion overlay."
-  (if pabbrev-overlay-decorators
-      (char-to-string (aref pabbrev-overlay-decorators 0))
-    ""))
+  (if (string-empty-p pabbrev-overlay-decorators)
+      ""
+    (char-to-string (aref pabbrev-overlay-decorators 0))))
 
 (defun pabbrev--right-decorator ()
   "Return right decoration for the suggestion overlay."
-  (if pabbrev-overlay-decorators
-      (char-to-string (aref pabbrev-overlay-decorators 1))
-    ""))
+  (if (string-empty-p pabbrev-overlay-decorators)
+      ""
+    (char-to-string (aref pabbrev-overlay-decorators 1))))
 
 (defsubst pabbrev-delete-overlay()
   "Make overlay invisible."
@@ -1108,13 +1107,18 @@ The suggestion should start with PREFIX, and be entered at point."
             pabbrev-expansion-suggestions suggestions)
       (pabbrev-set-overlay (point) (point) (length suggestions))
       (setq pabbrev-marker (cons (point) (point)))
-      (overlay-put pabbrev-overlay
-                   'after-string
-                   (concat
-                    (propertize (pabbrev--left-decorator) 'cursor 1)
-                    (propertize expansion
-                                'face (overlay-get pabbrev-overlay 'face))
-                    (pabbrev--right-decorator))))))
+      (let* ((left (unless (string-empty-p pabbrev-overlay-decorators)
+                     (propertize (pabbrev--left-decorator) 'cursor 1)))
+             (right (pabbrev--right-decorator))
+             (expansion (if left
+                            (propertize
+                                  expansion
+                                  'face (overlay-get pabbrev-overlay 'face))
+                          (propertize expansion
+                                      'face (overlay-get pabbrev-overlay 'face)
+                                      'cursor 1))))
+        (overlay-put pabbrev-overlay
+                     'after-string (concat left expansion right))))))
 
 (defvar pabbrev-last-expansion-suggestions nil
   "Cached alternative suggestions from the last expansion.")
