@@ -318,7 +318,7 @@ I'm not telling you which version, I prefer."
 
 (defcustom pabbrev-overlay-decorators "[]"
   "Left and right decorator for suggestions overlay.
-ode
+
 Should be a string of two printable characters, the first one for left
   decorationa and the second one for the right decoration. Nil means to not
   decorate at all"
