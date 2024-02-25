@@ -357,7 +357,6 @@ Should be a string of two printable characters, the first one for left
      :inverse-video t))
   "Font Lock mode face used to highlight suggestions")
 
-
 ;;;; End user Customizable variables.
 
 ;;; Package Support.
@@ -946,14 +945,16 @@ start and end positions")
 (defun pabbrev--left-decorator ()
   "Return left decoration for the suggestion overlay."
   (if (string-empty-p pabbrev-overlay-decorators)
-      ""
-    (char-to-string (aref pabbrev-overlay-decorators 0))))
+      nil
+    (propertize
+     (char-to-string (aref pabbrev-overlay-decorators 0)) 'cursor 1)))
 
 (defun pabbrev--right-decorator ()
   "Return right decoration for the suggestion overlay."
   (if (string-empty-p pabbrev-overlay-decorators)
-      ""
-    (char-to-string (aref pabbrev-overlay-decorators 1))))
+     nil 
+    (propertize
+     (char-to-string (aref pabbrev-overlay-decorators 1)) 'cursor 1)))
 
 (defsubst pabbrev-delete-overlay()
   "Make overlay invisible."
@@ -1107,18 +1108,18 @@ The suggestion should start with PREFIX, and be entered at point."
             pabbrev-expansion-suggestions suggestions)
       (pabbrev-set-overlay (point) (point) (length suggestions))
       (setq pabbrev-marker (cons (point) (point)))
-      (let* ((left (unless (string-empty-p pabbrev-overlay-decorators)
-                     (propertize (pabbrev--left-decorator) 'cursor 1)))
-             (right (pabbrev--right-decorator))
-             (expansion (if left
-                            (propertize
+      (let ((left (pabbrev--left-decorator)))
+        (overlay-put pabbrev-overlay
+                     'after-string
+                     (concat left
+                             (if left
+                                 (propertize
                                   expansion
                                   'face (overlay-get pabbrev-overlay 'face))
-                          (propertize expansion
-                                      'face (overlay-get pabbrev-overlay 'face)
-                                      'cursor 1))))
-        (overlay-put pabbrev-overlay
-                     'after-string (concat left expansion right))))))
+                               (propertize expansion
+                                           'face (overlay-get pabbrev-overlay 'face)
+                                           'cursor 1))
+                             (pabbrev--right-decorator)))))))
 
 (defvar pabbrev-last-expansion-suggestions nil
   "Cached alternative suggestions from the last expansion.")
