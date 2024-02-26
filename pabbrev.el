@@ -220,7 +220,10 @@
 ;;
 ;; Scott Vokes added a nice patch, adding the single/multiple expansion, the
 ;; universal argument support and some bug fixes.
-
+;;
+;; Terrence Yearwood for pointing out possible bug if Pabbrev is run in non-live
+;; buffers and suggesting a solution.
+;;
 ;;; News:
 
 ;; Since 4.2.2:
@@ -320,8 +323,8 @@ I'm not telling you which version, I prefer."
   "Left and right decorator for suggestions overlay.
 
 Should be a string of two printable characters, the first one for left
-  decorationa and the second one for the right decoration. Nil means to not
-  decorate at all"
+  decorationa and the second one for the right decoration. Empty string
+  means no decorations at all"
   :type 'string
   :set
   (lambda (var val)
