@@ -322,9 +322,9 @@ I'm not telling you which version, I prefer."
 (defcustom pabbrev-overlay-decorators "[]"
   "Left and right decorator for suggestions overlay.
 
-Should be a string of two printable characters, the first one for left
-  decorationa and the second one for the right decoration. Empty string
-  means no decorations at all"
+Should be a string of two printable characters, the first one for the
+left decoration, and the second one for the right decoration. Empty
+string means no decorations at all."
   :type 'string
   :set
   (lambda (var val)
