@@ -926,6 +926,12 @@ If it up too much processor power, see `pabbrev-scavenge-some-chunk-size'."
   (setq pabbrev-idle-timer-verbose nil))
 
 ;;; Suggestions handling
+(defun pabbrev-capf ()
+  "Complete suggestions at point."
+  (let ((candidates (pabbrev-fetch-all-suggestions-for-prefix
+                     (pabbrev-thing-at-point)))
+         (bounds (pabbrev-bounds-of-thing-at-point)))
+    (list (car bounds) (cdr bounds) candidates)))
 
 (defvar-local pabbrev-marker nil
   "Location of current insertion, or nil.
