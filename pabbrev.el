@@ -955,9 +955,8 @@ start and end positions")
 (defun pabbrev--right-decorator ()
   "Return right decoration for the suggestion overlay."
   (if (string-empty-p pabbrev-overlay-decorators)
-     nil 
-    (propertize
-     (char-to-string (aref pabbrev-overlay-decorators 1)) 'cursor 1)))
+     nil
+    (char-to-string (aref pabbrev-overlay-decorators 1))))
 
 (defsubst pabbrev-delete-overlay()
   "Make overlay invisible."
