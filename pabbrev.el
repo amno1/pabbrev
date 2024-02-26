@@ -328,13 +328,12 @@ Should be a string of two printable characters, the first one for left
   :type 'string
   :set
   (lambda (var val)
-    (let ((v (if (and (stringp val)
+    (set var (if (and (stringp val)
                       (= 2 (length val))
                       (aref printable-chars (aref val 0))
                       (aref printable-chars (aref val 1)))
                  val
-               "")))
-      (set var v))))
+               ""))))
 
 ;;(setq pabbrev-minimal-expansion-p t)
 
