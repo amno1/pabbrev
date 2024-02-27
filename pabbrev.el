@@ -244,6 +244,19 @@
   "*Will not activate function `global-pabbrev-mode' if buffers have this name."
   :type '(repeat (string :tag "Buffer name")))
 
+(defcustom pabbrev-global-mode-excluded-modes
+  '(;; I put this in at one point -- probably not needed now, but I have no
+    ;; where to test it.
+    telnet-mode
+    term-mode
+    ;; eshell uses it's own tab binding, so abbrevs get offered but not expanded
+    eshell-mode
+    ;; gnus article mode is read-only so should be missed anyway,
+    ;; but it does something wierd so that it's not
+    gnus-article-mode)
+  "*Will not activate function `global-pabbrev-mode' if buffers have this name."
+  :type '(repeat (symbol :tag "Mode name")))
+
 (defcustom pabbrev-global-mode-buffer-size-limit nil
   "Max size of buffers for `global-pabbrev-mode'.
 If a buffer is over this size (in chars), `pabbrev-mode' will not activate.
@@ -375,17 +388,8 @@ string means no decorations at all."
 ;; mark modes in which to not activate pabbrev with global mode.
 (mapc
  (lambda(x)
-   (put x 'pabbrev-global-mode-excluded-modes t))
- `(
-   ;; I put this in at one point -- probably not needed now, but I have no
-   ;; where to test it.
-   telnet-mode
-   term-mode
-   ;; eshell uses it's own tab binding, so abbrevs get offered but not expanded
-   eshell-mode
-   ;; gnus article mode is read-only so should be missed anyway,
-   ;; but it does something wierd so that it's not
-   gnus-article-mode))
+   (put x 'pabbrev-global-mode-excluded-mode t))
+ pabbrev-global-mode-excluded-modes)
 
 ;;;; End Package Support
 
@@ -1495,7 +1499,7 @@ Currently appropriate means, if the buffer is not read only, and is
 not a minibuffer."
   (unless (or buffer-read-only
               pabbrev-mode
-              (get major-mode 'pabbrev-global-mode-excluded-modes)
+              (get major-mode 'pabbrev-global-mode-excluded-mode)
               ;; don't turn on in non listable buffers
               (equal (substring (buffer-name) 0 1) " ")
               (when pabbrev-global-mode-buffer-size-limit
