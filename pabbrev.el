@@ -245,7 +245,7 @@
   :type '(repeat (string :tag "Buffer name")))
 
 (defcustom pabbrev-global-mode-excluded-modes
-  '(;; I put this in at one point -- probably not needed now, but I have no
+  `(;; I put this in at one point -- probably not needed now, but I have no
     ;; where to test it.
     telnet-mode
     term-mode
@@ -348,6 +348,13 @@ string means no decorations at all."
                  val
                ""))))
 
+(defcustom pabbrev-use-built-in-completion t
+  "How to display and complete suggestions.
+
+t means to display display suggestions in an overlay and complete with TAB key.
+nil means that built-in completion is disabled."
+  :type 'boolean)
+
 ;;(setq pabbrev-minimal-expansion-p t)
 
 ;; stolen from font-lock!
@@ -359,6 +366,7 @@ string means no decorations at all."
     (((class color) (background dark)) (:foreground "Red"))
     (t (:bold t :underline t)))
   "Face for displaying suggestions.")
+
 (defface pabbrev-single-suggestion-face
   '((((type tty) (class color)) (:foreground "green"))
     (((class grayscale) (background light)) (:foreground "Gray70" :bold t))
@@ -367,6 +375,7 @@ string means no decorations at all."
     (((class color) (background dark)) (:foreground "PaleGreen"))
     (t (:bold t :underline t)))
   "Face for displaying one suggestion.")
+
 (defface pabbrev-suggestions-label-face
   '((t
      :inverse-video t))
@@ -1431,6 +1440,16 @@ matching substring, while \\[pabbrev-suggestions-delete-window] just deletes the
 ;;; Pabbrev minor mode - display, and accepts abbreviations.
 ;; This code provides the minor mode which displays, and accepts
 ;; abbreviations.
+
+(defun pabbrev--toggle-built-in-completion (on)
+  (cond
+   (on
+    (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
+    (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t))
+   (t
+    (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
+    (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
+
 (defvar pabbrev-mode-map
   (let ((map (make-sparse-keymap)))
 
@@ -1472,16 +1491,14 @@ on in all buffers.
     (message "Can not use pabbrev-mode in read only buffer"))
   (cond
    (pabbrev-mode
-    (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
-    (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t)
+    (pabbrev--toggle-built-in-completion pabbrev-use-built-in-completion)
     ;; Switch on the idle timer if required when the mode is switched on.
     (pabbrev-ensure-idle-timer)
     ;; Also run the idle timer function, to put some works in the
     ;; dictionary.
     (pabbrev-scavenge-some))
    (t
-    (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
-    (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
+    (pabbrev--toggle-built-in-completion nil))))
 
 ;;   (easy-mmode-define-minor-mode pabbrev-mode
 ;;                              "Toggle pabbrev mode.

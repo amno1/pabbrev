@@ -20,9 +20,14 @@ places the results into data structures which enable very rapid
 extraction of expansions. The upshot of this is that it can offer
 suggestions as you type, without causing an unacceptable slow down.
 
-Pabbrev is a small package, un-intrusive and out of the way. Pabbrev
-can be used with Emacs completion facilities and packages such as Company
-or Corfu, for the user interaction and user interface.
+Pabbrev implements a ranking algorithm that places the most common word as the
+most probable suggestion for the completion. In its simplest form, Pabbrev can
+be used as the backend for other completion frameworks, such as Company or
+Corfu, via completion-at-point-functions. However, Pabbrev is designed to be
+used on its own, and offers it's own unique, in-buffer suggestions and
+completion.
+
+Pabbrev is a small package, un-intrusive and out of the way.
 
 * Features
 
@@ -31,13 +36,85 @@ or Corfu, for the user interaction and user interface.
 - Suggestions ranked by usage frequency or shortest-prefix
 - The best suggestion is inserted with TAB, on demand 
 - List of all available suggestions
-
-* Installation and Configuration
+- Completion-at-point-function for use with other completiion frameworks
+  
+* Installation
 
 Pabbrev is available from [[https://elpa.gnu.org/packages/corfu.html][GNU ELPA]]. You can install it directly via
 ~package-install~.
 
-To enable pabbrev in your Emacs, run =M-x global-pabbrev-mode=.
+* Configuration
+
+To enable pabbrev in your entire Emacs, run =M-x global-pabbrev-mode=.
+To enable Pabbrev just in current buffer, run M-x pabbrev-mode.
+If you would like to run Pabbrev just in a buffer or certain type you can add
+this to that mode hook:
+
+#+begin_src emacs-lisp
+(add-hook 'text-mode #'(lambda () (pabbrev-mode +1)))
+#+end_src
+
+Pabbrev is relatively self-going, however there are few knobs you can tweak.
+
+** Default completion style
+
+The built-in completion uses an in-buffer overlay at cursor, to display the
+highest ranked suggestion for complettion. You can use TAB key to actually
+insert the suggestion into the buffer, or just continue typing and it will go
+away.
+
+It is possible to customize the appereance of the built-in completion by
+customizing faces used to display the single and multiple suggestions (green and
+red by default), as well as left and right decorator for the overlay. Please see
+see the documentation for pabbrev-overlay-decorators variable via built-in help
+or in Customize interface. You can turn off delimiters by setting this variable
+to an empty string.
+
+** Verbosity
+
+Pabbrev prints messages when it is active to let you know it is doing
+something. You can disable those messages by customizing
+pabbrev-idle-timer-verbose to nil.
+
+For the full list of options please check the Customize interface for Pabbrev or
+the source code.
+
+* Pabbrev as a backend
+
+It is possible to disable the built-in completion completely and just use
+Pabbrev as the backend for popular completion frameworks such as Company or
+Corfu.
+
+To disable the built-in completion set pabbrev-use-built-in-completion to nil.
+You will have to add pabbrev-capf to the list of completion-at-point-functions
+
+#+begin_src emacs-lisp
+(add-to-list 'completion-at-point-functions #'pabbrev-capf)
+#+end_src
+
+and enable your favorite framework.
+
+If you do this from a running session with global-pabbrev-mode enabled, you will
+have to restart the mode in order for changes to take the effect.
+
+It is possible to use both the built-in completion together with other
+frameworks, however this is not recommended since Pabbrev and the completion
+frameworks will complete for the TAB key. If you want to use both at the same
+time, you are on your own (you will want to rebind pabbrev-expand-maybe to some
+other key probably). This useage is not extensively tested, so expect problems.
+
+* Excluding buffers
+
+You can exclude a buffer either by the name or by the major mode.
+
+- pabbrev-global-mode-not-buffer-names is a list containing buffer names to be
+  excluded
+- pabbrev-global-mode-excluded-modes is a list containing major mode
+  names in which you don't wish to run Pabbrev. For example:
+
+#+begin_src emacs-lisp
+(add-to-list 'pabbrev-global-mode-excluded-modes 'some-major-mode)
+#+end_src
 
 * Key bindings
 
@@ -48,6 +125,3 @@ Pabbrev bind keybindings in pabbrev-mode-map, and currently only binds
 
 All non-significant contributions to this package require a copyright assignment
 to the FSF.
-
-
-
