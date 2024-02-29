@@ -105,10 +105,12 @@ other key probably). This useage is not extensively tested, so expect problems.
 
 * Excluding buffers
 
-You can exclude a buffer either by the name or by the major mode.
+You can exclude a buffer by the name, size or by the major mode.
 
 - pabbrev-global-mode-not-buffer-names is a list containing buffer names to be
   excluded
+- pabbrev-global-mode-buffer-size-limit do not activate in buffers bigger than
+  this size
 - pabbrev-global-mode-excluded-modes is a list containing major mode
   names in which you don't wish to run Pabbrev. For example:
 

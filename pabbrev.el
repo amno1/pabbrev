@@ -230,6 +230,7 @@
 ;; - Cosmestic changes (enable lexical-binding, silence compiler warnings, ...)
 
 ;;; Code:
+(require 'ido)
 (require 'cl-lib)
 (require 'thingatpt)
 
@@ -1160,6 +1161,31 @@ The suggestion should start with PREFIX, and be entered at point."
 ;;              (not (eq prev-binding 'pabbrev-expand-maybe)))
 ;;         (funcall prev-binding))))
 
+(defvar pabbrev-suggestions-from-buffer nil)
+(defvar pabbrev-suggestions-done-suggestions nil)
+(defvar pabbrev-suggestions-best-suggestion nil)
+
+(defvar pabbrev-window-configuration nil
+  "Stores the window configuration before presence of a window buffer.")
+
+(defun pabbrev-suggestions-goto-buffer(suggestion-list)
+  "Jump into the suggestions buffer."
+  ;;  (if pabbrev-suggestions-buffer-enable
+  ;;    (pabbrev-suggestions-delete-window))
+  (setq pabbrev-window-configuration (current-window-configuration))
+  (pabbrev-suggestions-buffer suggestion-list "")
+  (shrink-window-if-larger-than-buffer
+   (select-window (get-buffer-window " *pabbrev suggestions*"))))
+
+(defun pabbrev-suggestions-ido-mode (suggestions)
+  "Choose among available SUGGESTIONS via IDO completing read."
+  (let ((pabbrev-suggestions-from-buffer (current-buffer)))
+    (pabbrev-suggestions-insert
+     (ido-completing-read "Pabbrev: " (mapcar #'car suggestions)))))
+
+;;(defvar pabbrev-completion-style #'pabbrev-suggestions-ido-mode)
+(defvar pabbrev-completion-style #'pabbrev-suggestions-goto-buffer)
+
 (defun pabbrev-expand-maybe(uarg)
   "Call appropriate expansion command based on whether minimal or
 full expansion is desired. If there is no expansion the command
@@ -1177,7 +1203,7 @@ With prefix argument, bring up the menu of all full expansions.
 UARG is the prefix argument."
   (cond
    ((and (= uarg 4) (> (length pabbrev-expansion-suggestions) 1))
-    (pabbrev-suggestions-goto-buffer pabbrev-expansion-suggestions))
+    (funcall pabbrev-completion-style pabbrev-expansion-suggestions))
    (pabbrev-expansion
     (pabbrev-expand))
    (t (pabbrev-call-previous-tab-binding))))
@@ -1188,11 +1214,11 @@ With prefix argument, bring up a menu of all full expansions.
 UARG is the prefix argument."
   (cond
    ((and (= uarg 4) (> (length pabbrev-expansion-suggestions) 1))
-    (pabbrev-suggestions-goto-buffer pabbrev-expansion-suggestions))
+    (funcall pabbrev-completion-style pabbrev-expansion-suggestions))
    ((and (eq last-command 'pabbrev-expand-maybe)
          (> (length pabbrev-expansion-suggestions) 1)
          (> (length pabbrev-last-expansion-suggestions) 1))
-    (pabbrev-suggestions-goto-buffer pabbrev-last-expansion-suggestions))
+    (funcall pabbrev-completion-style pabbrev-last-expansion-suggestions))
    (pabbrev-expansion
     (setq pabbrev-last-expansion-suggestions pabbrev-expansion-suggestions)
     (pabbrev-expand))
@@ -1257,9 +1283,6 @@ The command `pabbrev-show-previous-binding' prints this out."
     (message "No expansion"))
   (setq pabbrev-expansion nil))
 
-(defvar pabbrev-window-configuration nil
-  "Stores the window configuration before presence of a window buffer.")
-
 ;; suggestions buffer
 ;; (defvar pabbrev-suggestions-buffer-enable nil)
 ;; (defun pabbrev-suggestions-toggle()
@@ -1285,7 +1308,7 @@ The command `pabbrev-show-previous-binding' prints this out."
 (defun pabbrev-suggestions-delete-window()
   "Delete the suggestions window."
   (interactive)
-  (when (or pabbrev-mode (equal (buffer-name) " *pabbrev suggestions*"))
+  (when (equal (buffer-name) " *pabbrev suggestions*")
     (delete-window (get-buffer-window " *pabbrev suggestions*"))
     (set-window-configuration pabbrev-window-configuration)))
 
@@ -1300,20 +1323,6 @@ The command `pabbrev-show-previous-binding' prints this out."
 ;; (defun pabbrev-post-command-show-suggestions(suggestions prefix)
 ;;   (if pabbrev-suggestions-buffer-enable
 ;;       (pabbrev-suggestions-buffer suggestions prefix)))
-
-
-(defun pabbrev-suggestions-goto-buffer(suggestion-list)
-  "Jump into the suggestions buffer."
-  ;;  (if pabbrev-suggestions-buffer-enable
-  ;;    (pabbrev-suggestions-delete-window))
-  (setq pabbrev-window-configuration (current-window-configuration))
-  (pabbrev-suggestions-buffer suggestion-list "")
-  (shrink-window-if-larger-than-buffer
-   (select-window (get-buffer-window " *pabbrev suggestions*"))))
-
-(defvar pabbrev-suggestions-from-buffer nil)
-(defvar pabbrev-suggestions-done-suggestions nil)
-(defvar pabbrev-suggestions-best-suggestion nil)
 
 (defsubst pabbrev-suggestions-subseq(sequence from to)
   "Return subsequence from SEQUENCE starting FROM and ending with TO."
@@ -1441,15 +1450,6 @@ matching substring, while \\[pabbrev-suggestions-delete-window] just deletes the
 ;; This code provides the minor mode which displays, and accepts
 ;; abbreviations.
 
-(defun pabbrev--toggle-built-in-completion (on)
-  (cond
-   (on
-    (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
-    (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t))
-   (t
-    (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
-    (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
-
 (defvar pabbrev-mode-map
   (let ((map (make-sparse-keymap)))
 
@@ -1491,14 +1491,17 @@ on in all buffers.
     (message "Can not use pabbrev-mode in read only buffer"))
   (cond
    (pabbrev-mode
-    (pabbrev--toggle-built-in-completion pabbrev-use-built-in-completion)
+    (when pabbrev-use-built-in-completion
+      (add-hook 'pre-command-hook #'pabbrev-pre-command-hook nil t)
+      (add-hook 'post-command-hook #'pabbrev-post-command-hook nil t))
     ;; Switch on the idle timer if required when the mode is switched on.
     (pabbrev-ensure-idle-timer)
     ;; Also run the idle timer function, to put some works in the
     ;; dictionary.
     (pabbrev-scavenge-some))
    (t
-    (pabbrev--toggle-built-in-completion nil))))
+    (remove-hook 'pre-command-hook #'pabbrev-pre-command-hook t)
+    (remove-hook 'post-command-hook #'pabbrev-post-command-hook t))))
 
 ;;   (easy-mmode-define-minor-mode pabbrev-mode
 ;;                              "Toggle pabbrev mode.
