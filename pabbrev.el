@@ -332,6 +332,10 @@ completion seen on a command line.
 I'm not telling you which version, I prefer."
   :type 'boolean)
 
+(defcustom pabbrev-minimal-word-length 2
+  "Don't hash words lesser than this length."
+  :type 'fixnum)
+
 (defcustom pabbrev-overlay-decorators "[]"
   "Left and right decorator for suggestions overlay.
 
@@ -771,8 +775,11 @@ This looks very ugly.  Note that this only shows newly added words.  Use
     (let ((start (car bounds))
           (end (cdr bounds)))
       (unless
-          ;; is this word or part of it already added?
-          (pabbrev-bounds-marked-p start end)
+          (and
+           ;; is this word or part of it already added?
+           (pabbrev-bounds-marked-p start end)
+           ;; is it longer than minimal completion?
+           (> pabbrev-minimal-word-length (- end start)))
         ;; mark the word visibly as well.
         (pabbrev-debug-display start end)
         ;; set a property so that we know what we have done.
