@@ -971,17 +971,12 @@ start and end positions")
 (defvar-local pabbrev-overlay nil
   "Overlay for offered completion.")
 
-(defsubst pabbrev--left-decorator ()
+(defsubst pabbrev--decorator (&optional right)
   "Return left decoration for the suggestion overlay."
   (if (string-empty-p pabbrev-overlay-decorators)
       nil
-    (char-to-string (aref pabbrev-overlay-decorators 0))))
-
-(defsubst pabbrev--right-decorator ()
-  "Return right decoration for the suggestion overlay."
-  (if (string-empty-p pabbrev-overlay-decorators)
-     nil
-    (char-to-string (aref pabbrev-overlay-decorators 1))))
+    (char-to-string
+     (aref pabbrev-overlay-decorators (if right 1 0)))))
 
 (defsubst pabbrev-delete-overlay()
   "Make overlay invisible."
@@ -1137,11 +1132,11 @@ The suggestion should start with PREFIX, and be entered at point."
       (setq pabbrev-marker (cons (point) (point)))
       (overlay-put pabbrev-overlay
                    'after-string
-                   (concat (pabbrev--left-decorator)
+                   (concat (pabbrev--decorator)
                            (propertize expansion
                                        'face (overlay-get pabbrev-overlay 'face)
                                        'cursor 1)
-                           (pabbrev--right-decorator))))))
+                           (pabbrev--decorator 'right))))))
 
 (defvar pabbrev-last-expansion-suggestions nil
   "Cached alternative suggestions from the last expansion.")
