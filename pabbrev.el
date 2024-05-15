@@ -1331,14 +1331,10 @@ The command `pabbrev-show-previous-binding' prints this out."
 ;;   (if pabbrev-suggestions-buffer-enable
 ;;       (pabbrev-suggestions-buffer suggestions prefix)))
 
-(defsubst pabbrev-suggestions-subseq(sequence from to)
-  "Return subsequence from SEQUENCE starting FROM and ending with TO."
-  (cl-subseq sequence (min 0 from) (min (length sequence) to)))
-
 (defsubst pabbrev-suggestions-limit-alpha-sort (suggestions)
   "Limit suggestions and sort."
   (delq nil
-        (sort (pabbrev-suggestions-subseq suggestions 0 10)
+        (sort (cl-subseq suggestions 0 (min (length sequence) 10))
               (lambda(a b)
                 (string< (car a) (car b))))))
 
@@ -1430,7 +1426,8 @@ matching substring, while \\[pabbrev-suggestions-delete-window] just deletes the
   (pabbrev-suggestions-insert
    ;;(try-completion "" pabbrev-suggestions-done-suggestions)))
    (try-completion
-    "" (pabbrev-suggestions-subseq pabbrev-suggestions-done-suggestions 0 10))))
+    "" (cl-subseq pabbrev-suggestions-done-suggestions
+                  0 (min (length sequence) 10)))))
 
 (defun pabbrev-suggestions-insert(insertion)
   "Actually insert the suggestion."
